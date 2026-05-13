@@ -1,5 +1,5 @@
 use std::{
-    fs,
+    fs::{self, DirEntry},
     io::Write,
     path::{Path, PathBuf},
     process::Command,
@@ -133,6 +133,7 @@ fn ensure_source(cache: &Cache, pin: &ResolvedPin) -> Result<PathBuf> {
     let temp = tempfile::tempdir_in(parent)?;
 
     if download_github_archive(cache, pin, temp.path()).is_err() {
+        reset_directory(temp.path())?;
         shallow_fetch_checkout(pin, temp.path())?;
     }
 
@@ -158,6 +159,7 @@ fn download_github_archive(cache: &Cache, pin: &ResolvedPin, destination: &Path)
             let mut archive = tar::Archive::new(gzip);
             archive.unpack(destination)?;
             flatten_single_directory(destination)?;
+            reject_archive_with_submodules(destination)?;
             return Ok(());
         }
         let url = format!(
@@ -181,6 +183,7 @@ fn download_github_archive(cache: &Cache, pin: &ResolvedPin, destination: &Path)
     let mut archive = tar::Archive::new(gzip);
     archive.unpack(destination)?;
     flatten_single_directory(destination)?;
+    reject_archive_with_submodules(destination)?;
     Ok(())
 }
 
@@ -205,9 +208,83 @@ fn shallow_fetch_checkout(pin: &ResolvedPin, destination: &Path) -> Result<()> {
         "--detach",
         "FETCH_HEAD",
     ]))?;
+    run(Command::new("git").arg("-C").arg(destination).args([
+        "submodule",
+        "update",
+        "--init",
+        "--recursive",
+    ]))?;
     let git_dir = destination.join(".git");
     if git_dir.exists() {
         fs::remove_dir_all(git_dir)?;
     }
     Ok(())
+}
+
+fn reject_archive_with_submodules(destination: &Path) -> Result<()> {
+    if destination.join(".gitmodules").exists() {
+        anyhow::bail!(
+            "{} declares git submodules, which GitHub source archives do not include",
+            destination.display()
+        );
+    }
+    Ok(())
+}
+
+fn reset_directory(path: &Path) -> Result<()> {
+    if path.exists() {
+        for entry in fs::read_dir(path)? {
+            remove_entry(entry?)?;
+        }
+    }
+    fs::create_dir_all(path)?;
+    Ok(())
+}
+
+fn remove_entry(entry: DirEntry) -> Result<()> {
+    let path = entry.path();
+    if entry.file_type()?.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use std::fs;
+
+    use super::*;
+
+    #[test]
+    fn archive_checkouts_with_submodules_are_rejected() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join("Package.swift"),
+            "// swift-tools-version: 6.0\n",
+        )
+        .unwrap();
+        fs::write(
+            temp.path().join(".gitmodules"),
+            "[submodule \"Sources/CDependency\"]\n",
+        )
+        .unwrap();
+
+        let error = reject_archive_with_submodules(temp.path()).unwrap_err();
+
+        assert!(error.to_string().contains("declares git submodules"));
+    }
+
+    #[test]
+    fn reset_directory_removes_existing_archive_contents() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::create_dir_all(temp.path().join("Sources")).unwrap();
+        fs::write(temp.path().join("Sources/file.swift"), "").unwrap();
+        fs::write(temp.path().join(".gitmodules"), "").unwrap();
+
+        reset_directory(temp.path()).unwrap();
+
+        assert!(fs::read_dir(temp.path()).unwrap().next().is_none());
+    }
 }
