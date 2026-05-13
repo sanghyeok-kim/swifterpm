@@ -28,8 +28,14 @@ if [[ -z "${target}" || -z "${version}" ]]; then
   exit 1
 fi
 
+mask_ci_value() {
+  if [[ -n "${GITHUB_ACTIONS:-}" && -n "${1:-}" ]]; then
+    printf "::add-mask::%s\n" "$1"
+  fi
+}
+
 mkdir -p dist
-cargo build --locked --release --target "${target}"
+SWIFTERPM_VERSION="${version}" cargo build --locked --release --target "${target}"
 
 case "${target}" in
   *-windows-*)
@@ -47,6 +53,7 @@ cp "target/${target}/release/${bin_name}" "${stage_dir}/${bin_name}"
 if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]]; then
   keychain_path="${stage_dir}/signing.keychain"
   keychain_password="$(uuidgen)"
+  mask_ci_value "${keychain_password}"
   team_id="${SWIFTERPM_APPLE_TEAM_ID:-U6LC622NKF}"
   certificate_name="${SWIFTERPM_CERTIFICATE_NAME:-Developer ID Application: Tuist GmbH (U6LC622NKF)}"
   certificate_item="${SWIFTERPM_CERTIFICATE_ITEM:-op://tuist/Developer ID Application Certificate}"
@@ -64,6 +71,8 @@ if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]];
     fi
   done
 
+  mask_ci_value "${OP_SERVICE_ACCOUNT_TOKEN}"
+
   echo "Setting up temporary keychain for macOS signing"
   security create-keychain -p "${keychain_password}" "${keychain_path}"
   security set-keychain-settings -lut 21600 "${keychain_path}"
@@ -71,8 +80,9 @@ if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]];
   security unlock-keychain -p "${keychain_password}" "${keychain_path}"
   security list-keychains -d user -s "${keychain_path}"
 
-  op read "${certificate_item}/certificate.p12" --out-file "${stage_dir}/certificate.p12"
+  op read "${certificate_item}/certificate.p12" --out-file "${stage_dir}/certificate.p12" >/dev/null
   certificate_password="$(op read "${certificate_item}/password")"
+  mask_ci_value "${certificate_password}"
   security import "${stage_dir}/certificate.p12" \
     -k "${keychain_path}" \
     -P "${certificate_password}" \
@@ -94,12 +104,16 @@ if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]];
 
   echo "Submitting ${bin_name} for notarization"
   notarization_zip="${stage_dir}/notarization.zip"
+  notary_username="$(op read "${app_password_item}/username")"
+  notary_password="$(op read "${app_password_item}/password")"
+  mask_ci_value "${notary_username}"
+  mask_ci_value "${notary_password}"
   ditto -c -k --keepParent "${stage_dir}/${bin_name}" "${notarization_zip}"
   xcrun notarytool submit "${notarization_zip}" \
     --wait \
-    --apple-id "$(op read "${app_password_item}/username")" \
+    --apple-id "${notary_username}" \
     --team-id "${team_id}" \
-    --password "$(op read "${app_password_item}/password")" \
+    --password "${notary_password}" \
     --output-format json | jq -e '.status == "Accepted"' >/dev/null
 fi
 

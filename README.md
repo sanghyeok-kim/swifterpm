@@ -10,6 +10,18 @@ It is not a drop-in SwiftPM replacement yet. The current implementation focuses 
 
 ## Commands
 
+Install the latest release with mise:
+
+```sh
+mise use -g github:tuist/swifterpm@latest
+```
+
+Or run it without changing your mise config:
+
+```sh
+mise x github:tuist/swifterpm@latest -- swifterpm --version
+```
+
 ```sh
 cargo build
 target/debug/swifterpm --package-path . resolve

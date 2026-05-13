@@ -13,7 +13,7 @@ use crate::{
 
 #[derive(Debug, Parser)]
 #[command(
-    version,
+    version = cli_version(),
     about = "A fast Rust prototype for Swift package resolution and checkout restoration"
 )]
 struct Cli {
@@ -82,6 +82,10 @@ struct Cli {
     package_info_cache_path: Option<PathBuf>,
     #[command(subcommand)]
     command: Commands,
+}
+
+fn cli_version() -> &'static str {
+    option_env!("SWIFTERPM_VERSION").unwrap_or(env!("CARGO_PKG_VERSION"))
 }
 
 #[derive(Debug, Subcommand)]
