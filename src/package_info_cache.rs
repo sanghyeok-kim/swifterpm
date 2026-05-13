@@ -8,9 +8,10 @@ use std::{
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde::Serialize;
+use serde_json::Value;
 
 use crate::{
-    manifest::dump_package_json,
+    manifest::{dump_package_json, parse_manifest_file_system_dependencies},
     resolved::{ResolvedPin, ResolvedPins, checkout_directory_name, is_source_control_kind},
     util::{atomic_write, lock_path, stable_hash},
 };
@@ -56,6 +57,7 @@ pub(crate) fn write_package_info_cache(
             package_dir.display()
         )
     })?;
+    let root_manifest: Value = serde_json::from_slice(&fs::read(&root_path)?)?;
 
     let checkouts_dir = scratch_dir.join("checkouts");
     let mut source_pins = resolved
@@ -66,7 +68,7 @@ pub(crate) fn write_package_info_cache(
         .collect::<Vec<_>>();
     source_pins.sort_by(|left, right| left.identity.cmp(&right.identity));
 
-    let packages = source_pins
+    let mut packages = source_pins
         .par_iter()
         .map(|pin| {
             let package_path = checkouts_dir.join(checkout_directory_name(pin));
@@ -80,6 +82,32 @@ pub(crate) fn write_package_info_cache(
             Ok(package_entry(pin, package_path, package_info_path))
         })
         .collect::<Result<Vec<_>>>()?;
+
+    let mut local_dependencies = parse_manifest_file_system_dependencies(&root_manifest)?;
+    local_dependencies.sort_by(|left, right| left.identity.cmp(&right.identity));
+    for dependency in local_dependencies {
+        let package_path = PathBuf::from(&dependency.path);
+        let package_info_path = cache_dir.join("packages").join(format!(
+            "{}-{}.json",
+            file_safe_name(&dependency.identity),
+            stable_hash(&dependency.path)
+                .chars()
+                .take(16)
+                .collect::<String>()
+        ));
+        write_dump_package_json(&package_path, &package_info_path, disable_sandbox).with_context(
+            || format!("failed to cache Package.swift for {}", dependency.identity),
+        )?;
+        packages.push(PackageInfoEntry {
+            identity: dependency.identity,
+            kind: "fileSystem".to_string(),
+            location: dependency.path,
+            version: None,
+            revision: None,
+            package_path: package_path.display().to_string(),
+            package_info_path: package_info_path.display().to_string(),
+        });
+    }
 
     let index = PackageInfoIndex {
         schema_version: 1,
@@ -145,8 +173,11 @@ fn entry_hash(pin: &ResolvedPin) -> String {
 }
 
 fn file_safe_identity(pin: &ResolvedPin) -> String {
-    pin.identity
-        .chars()
+    file_safe_name(&pin.identity)
+}
+
+fn file_safe_name(name: &str) -> String {
+    name.chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || matches!(character, '-' | '_' | '.') {
                 character

@@ -13,6 +13,7 @@ use serde_json::{Value, json};
 use crate::{
     cache::Cache,
     github::{GitHubRepo, github_token},
+    manifest::{dump_package, parse_manifest_file_system_dependencies},
     resolved::{ResolvedPin, ResolvedPins, checkout_directory_name, is_source_control_kind},
     util::{
         atomic_write, flatten_single_directory, lock_path,
@@ -53,8 +54,6 @@ pub(crate) fn restore_package(
             println!("restored {} -> {}", identity, source.display());
         }
     }
-    write_workspace_state(scratch_dir, resolved)?;
-
     if !quiet {
         println!(
             "restored {} source-control packages into {}",
@@ -68,8 +67,14 @@ pub(crate) fn restore_package(
     Ok(())
 }
 
-fn write_workspace_state(scratch_dir: &Path, resolved: &ResolvedPins) -> Result<()> {
+pub(crate) fn write_workspace_state(
+    package_dir: &Path,
+    scratch_dir: &Path,
+    resolved: &ResolvedPins,
+    disable_sandbox: bool,
+) -> Result<()> {
     let mut dependencies = Vec::new();
+    let mut artifacts = Vec::new();
     for pin in &resolved.pins {
         if !is_source_control_kind(&pin.kind) {
             continue;
@@ -98,11 +103,37 @@ fn write_workspace_state(scratch_dir: &Path, resolved: &ResolvedPins) -> Result<
             },
             "subpath": checkout_directory_name(pin)
         }));
+
+        artifacts.extend(discover_artifacts(scratch_dir, pin)?);
+    }
+
+    let manifest = dump_package(package_dir, disable_sandbox).with_context(|| {
+        format!(
+            "failed to inspect Package.swift at {}",
+            package_dir.display()
+        )
+    })?;
+    for dependency in parse_manifest_file_system_dependencies(&manifest)? {
+        let identity = dependency.identity;
+        let name = dependency.name;
+        let path = dependency.path;
+        dependencies.push(json!({
+            "basedOn": null,
+            "packageRef": {
+                "identity": identity.clone(),
+                "kind": "fileSystem",
+                "location": path.clone(),
+                "name": name,
+                "path": path.clone()
+            },
+            "state": null,
+            "subpath": identity
+        }));
     }
 
     let state = json!({
         "object": {
-            "artifacts": [],
+            "artifacts": artifacts,
             "dependencies": dependencies,
             "prebuilts": []
         },
@@ -113,6 +144,52 @@ fn write_workspace_state(scratch_dir: &Path, resolved: &ResolvedPins) -> Result<
     let mut bytes = serde_json::to_vec_pretty(&state)?;
     writeln!(bytes)?;
     atomic_write(&path, &bytes)?;
+    Ok(())
+}
+
+fn discover_artifacts(scratch_dir: &Path, pin: &ResolvedPin) -> Result<Vec<Value>> {
+    let artifacts_dir = scratch_dir.join("artifacts").join(&pin.identity);
+    if !artifacts_dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut artifacts = Vec::new();
+    collect_artifacts(&artifacts_dir, pin, &mut artifacts)?;
+    Ok(artifacts)
+}
+
+fn collect_artifacts(
+    directory: &Path,
+    pin: &ResolvedPin,
+    artifacts: &mut Vec<Value>,
+) -> Result<()> {
+    for entry in fs::read_dir(directory)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+
+        if path.extension().and_then(|extension| extension.to_str()) == Some("xcframework") {
+            let target_name = path
+                .file_stem()
+                .and_then(|name| name.to_str())
+                .unwrap_or(&pin.identity);
+            artifacts.push(json!({
+                "kind": { "xcframework": {} },
+                "packageRef": {
+                    "identity": pin.identity,
+                    "kind": pin.kind,
+                    "location": pin.location,
+                    "name": checkout_directory_name(pin)
+                },
+                "path": path.display().to_string(),
+                "targetName": target_name
+            }));
+        } else {
+            collect_artifacts(&path, pin, artifacts)?;
+        }
+    }
     Ok(())
 }
 

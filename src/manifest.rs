@@ -11,6 +11,13 @@ pub(crate) struct ManifestDependency {
     pub(crate) requirement: Requirement,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct ManifestFileSystemDependency {
+    pub(crate) identity: String,
+    pub(crate) name: String,
+    pub(crate) path: String,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum Requirement {
     Exact(Version),
@@ -75,6 +82,45 @@ pub(crate) fn parse_manifest_dependencies(manifest: &Value) -> Result<Vec<Manife
                 identity,
                 location,
                 requirement,
+            });
+        }
+    }
+
+    Ok(dependencies)
+}
+
+pub(crate) fn parse_manifest_file_system_dependencies(
+    manifest: &Value,
+) -> Result<Vec<ManifestFileSystemDependency>> {
+    let mut dependencies = Vec::new();
+    let Some(items) = manifest.get("dependencies").and_then(Value::as_array) else {
+        return Ok(dependencies);
+    };
+
+    for item in items {
+        let Some(file_system) = item.get("fileSystem").and_then(Value::as_array) else {
+            continue;
+        };
+        for dependency in file_system {
+            let identity = dependency
+                .get("identity")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("fileSystem dependency is missing identity"))?
+                .to_string();
+            let path = dependency
+                .get("path")
+                .and_then(Value::as_str)
+                .ok_or_else(|| anyhow!("{identity} is missing path"))?
+                .to_string();
+            let name = dependency
+                .get("nameForTargetDependencyResolutionOnly")
+                .and_then(Value::as_str)
+                .unwrap_or(&identity)
+                .to_string();
+            dependencies.push(ManifestFileSystemDependency {
+                identity,
+                name,
+                path,
             });
         }
     }

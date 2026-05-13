@@ -8,7 +8,7 @@ use crate::{
     package_info_cache::write_package_info_cache,
     resolve::resolve_package,
     resolved::{print_resolution, read_resolved_file, write_resolved_file},
-    restore::restore_package,
+    restore::{restore_package, write_workspace_state},
 };
 
 #[derive(Debug, Parser)]
@@ -202,7 +202,8 @@ pub fn run() -> Result<()> {
             let scratch = command_scratch_dir(&cli, &package, scratch_dir.as_ref());
             let resolved = read_resolved_file(&package)?;
             restore_package(&scratch, &cache, &resolved, cli.quiet)?;
-            maybe_write_package_info_cache(&cli, &package, &scratch, &resolved)
+            maybe_write_package_info_cache(&cli, &package, &scratch, &resolved)?;
+            write_workspace_state(&package, &scratch, &resolved, cli.disable_sandbox)
         }
     }
 }
@@ -239,6 +240,7 @@ fn run_resolution_command(
     if should_restore(restore, print_only) {
         restore_package(&scratch, &cache, &resolved, cli.quiet)?;
         maybe_write_package_info_cache(cli, &package, &scratch, &resolved)?;
+        write_workspace_state(&package, &scratch, &resolved, cli.disable_sandbox)?;
     }
     Ok(())
 }

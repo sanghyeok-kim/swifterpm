@@ -20,7 +20,9 @@ mod tests {
     use serde_json::json;
 
     use crate::{
-        manifest::{Requirement, parse_manifest_dependencies},
+        manifest::{
+            Requirement, parse_manifest_dependencies, parse_manifest_file_system_dependencies,
+        },
         remote::parse_swift_tag_version,
         resolved::{ResolvedPins, cache_test_path, checkout_directory_name},
         solver::{
@@ -76,6 +78,43 @@ mod tests {
             dependencies[0].requirement,
             Requirement::Range { .. }
         ));
+    }
+
+    #[test]
+    fn parses_swiftpm_file_system_dependencies() {
+        let manifest = json!({
+            "dependencies": [
+                {
+                    "fileSystem": [
+                        {
+                            "identity": "xcactivitylog_nif",
+                            "path": "/repo/server/native/xcactivitylog_nif"
+                        }
+                    ]
+                },
+                {
+                    "fileSystem": [
+                        {
+                            "identity": "xcresult_nif",
+                            "nameForTargetDependencyResolutionOnly": "XCResultNIF",
+                            "path": "/repo/server/native/xcresult_nif"
+                        }
+                    ]
+                }
+            ]
+        });
+
+        let dependencies = parse_manifest_file_system_dependencies(&manifest).unwrap();
+
+        assert_eq!(dependencies.len(), 2);
+        assert_eq!(dependencies[0].identity, "xcactivitylog_nif");
+        assert_eq!(dependencies[0].name, "xcactivitylog_nif");
+        assert_eq!(
+            dependencies[0].path,
+            "/repo/server/native/xcactivitylog_nif"
+        );
+        assert_eq!(dependencies[1].identity, "xcresult_nif");
+        assert_eq!(dependencies[1].name, "XCResultNIF");
     }
 
     #[test]
