@@ -93,29 +93,45 @@ mod tests {
     #[test]
     fn default_cache_root_uses_xdg_cache_home() {
         let got = default_cache_root_from_env(
-            Some(OsString::from("/tmp/xdg-cache")),
-            Some(OsString::from("/tmp/home")),
+            Some(OsString::from(test_xdg_cache_home())),
+            Some(OsString::from(test_home())),
         )
         .unwrap();
 
-        assert_eq!(got, PathBuf::from("/tmp/xdg-cache/swifterpm"));
+        assert_eq!(got, PathBuf::from(test_xdg_cache_home()).join("swifterpm"));
     }
 
     #[test]
     fn default_cache_root_falls_back_to_home_cache_directory() {
-        let got = default_cache_root_from_env(None, Some(OsString::from("/tmp/home"))).unwrap();
+        let got = default_cache_root_from_env(None, Some(OsString::from(test_home()))).unwrap();
 
-        assert_eq!(got, PathBuf::from("/tmp/home/.cache/swifterpm"));
+        assert_eq!(got, PathBuf::from(test_home()).join(".cache/swifterpm"));
     }
 
     #[test]
     fn default_cache_root_ignores_relative_xdg_cache_home() {
         let got = default_cache_root_from_env(
             Some(OsString::from("relative")),
-            Some(OsString::from("/tmp/home")),
+            Some(OsString::from(test_home())),
         )
         .unwrap();
 
-        assert_eq!(got, PathBuf::from("/tmp/home/.cache/swifterpm"));
+        assert_eq!(got, PathBuf::from(test_home()).join(".cache/swifterpm"));
+    }
+
+    fn test_xdg_cache_home() -> &'static str {
+        if cfg!(windows) {
+            r"C:\Users\test\AppData\Local\cache"
+        } else {
+            "/tmp/xdg-cache"
+        }
+    }
+
+    fn test_home() -> &'static str {
+        if cfg!(windows) {
+            r"C:\Users\test"
+        } else {
+            "/tmp/home"
+        }
     }
 }
