@@ -14,7 +14,10 @@ use crate::{
     cache::Cache,
     github::{GitHubRepo, github_token},
     resolved::{ResolvedPin, ResolvedPins, checkout_directory_name, is_source_control_kind},
-    util::{atomic_write, flatten_single_directory, lock_path, replace_with_symlink, run},
+    util::{
+        atomic_write, flatten_single_directory, lock_path,
+        replace_with_symlinked_directory_contents, run,
+    },
 };
 
 pub(crate) fn restore_package(
@@ -40,7 +43,7 @@ pub(crate) fn restore_package(
             let source = ensure_source(cache, pin)
                 .with_context(|| format!("failed to materialize {}", pin.identity))?;
             let checkout = checkouts.join(checkout_directory_name(pin));
-            replace_with_symlink(&source, &checkout)?;
+            replace_with_symlinked_directory_contents(&source, &checkout)?;
             Ok((pin.identity.clone(), source))
         })
         .collect::<Result<Vec<_>>>()?;

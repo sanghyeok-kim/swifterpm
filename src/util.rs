@@ -35,19 +35,43 @@ pub(crate) fn stable_hash(input: &str) -> String {
     hex::encode(hasher.finalize())
 }
 
-pub(crate) fn replace_with_symlink(source: &Path, link: &Path) -> Result<()> {
-    if link.symlink_metadata().is_ok() {
-        if link.is_dir() && !link.is_symlink() {
-            fs::remove_dir_all(link)?;
-        } else {
-            fs::remove_file(link)?;
-        }
+pub(crate) fn replace_with_symlinked_directory_contents(
+    source: &Path,
+    destination: &Path,
+) -> Result<()> {
+    if destination.symlink_metadata().is_ok() {
+        remove_path(destination)?;
     }
+    fs::create_dir_all(destination)?;
 
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        symlink_path(&entry.path(), &destination.join(entry.file_name()))?;
+    }
+    Ok(())
+}
+
+fn symlink_path(source: &Path, link: &Path) -> Result<()> {
     #[cfg(unix)]
     std::os::unix::fs::symlink(source, link)?;
     #[cfg(windows)]
-    std::os::windows::fs::symlink_dir(source, link)?;
+    {
+        if source.is_dir() {
+            std::os::windows::fs::symlink_dir(source, link)?;
+        } else {
+            std::os::windows::fs::symlink_file(source, link)?;
+        }
+    }
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> Result<()> {
+    let metadata = path.symlink_metadata()?;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
     Ok(())
 }
 
@@ -66,6 +90,52 @@ pub(crate) fn flatten_single_directory(path: &Path) -> Result<()> {
     fs::remove_dir_all(path)?;
     fs::rename(temp, path)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn symlinked_directory_contents_preserve_destination_as_real_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source");
+        let destination = temp.path().join("destination");
+        fs::create_dir_all(source.join("Sources")).unwrap();
+        fs::write(source.join("Package.swift"), "").unwrap();
+        fs::write(source.join("Sources/Library.swift"), "").unwrap();
+
+        replace_with_symlinked_directory_contents(&source, &destination).unwrap();
+
+        assert!(destination.is_dir());
+        assert!(
+            !destination
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            destination
+                .join("Package.swift")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert!(
+            destination
+                .join("Sources")
+                .symlink_metadata()
+                .unwrap()
+                .file_type()
+                .is_symlink()
+        );
+        assert_eq!(
+            destination.join("..").canonicalize().unwrap(),
+            temp.path().canonicalize().unwrap()
+        );
+    }
 }
 
 pub(crate) struct PathLock {
