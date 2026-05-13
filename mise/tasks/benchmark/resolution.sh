@@ -63,6 +63,31 @@ copy_tree() {
   fi
 }
 
+append_percentage_summary() {
+  local json_path="$1"
+
+  swift - "${json_path}" <<'SWIFT'
+import Foundation
+
+let jsonPath = CommandLine.arguments[1]
+let data = try Data(contentsOf: URL(fileURLWithPath: jsonPath))
+let root = try JSONSerialization.jsonObject(with: data) as? [String: Any]
+let results = root?["results"] as? [[String: Any]] ?? []
+
+guard results.count >= 2,
+      let swiftMean = results[0]["mean"] as? Double,
+      let swifterpmMean = results[1]["mean"] as? Double,
+      swiftMean > 0,
+      swifterpmMean > 0 else {
+    exit(0)
+}
+
+let reduction = ((swiftMean - swifterpmMean) / swiftMean) * 100
+let speedup = swiftMean / swifterpmMean
+print(String(format: "swifterpm reduced mean resolution time by %.2f%% (%.2fx speedup).", reduction, speedup))
+SWIFT
+}
+
 run_hyperfine() {
   local name="$1"
   local mode="$2"
@@ -85,6 +110,8 @@ run_hyperfine() {
     echo "## ${name}: ${mode}"
     echo
     cat "${markdown_path}"
+    echo
+    append_percentage_summary "${json_path}"
     echo
   } >> "${combined_report}"
 }

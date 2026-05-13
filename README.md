@@ -126,17 +126,17 @@ mise run benchmark:resolution -- --runs 1 --output-dir /tmp/swifterpm-benchmark-
 
 Pocket Casts iOS `Modules/Package.swift`:
 
-| Scenario | SwiftPM | swifterpm | Speedup |
-|:---|---:|---:|---:|
-| Cold | 225.498 s | 9.392 s | 24.01x |
-| Worktree-warm | 54.705 s | 0.014 s | 3989.37x |
+| Scenario | SwiftPM | swifterpm | Time reduction | Speedup |
+|:---|---:|---:|---:|---:|
+| Cold | 225.498 s | 9.392 s | 95.83% | 24.01x |
+| Worktree-warm | 54.705 s | 0.014 s | 99.97% | 3989.37x |
 
 Firefox iOS root `Package.swift`:
 
-| Scenario | SwiftPM | swifterpm | Speedup |
-|:---|---:|---:|---:|
-| Cold | 37.414 s | 1.203 s | 31.10x |
-| Worktree-warm | 4.439 s | 0.008 s | 522.78x |
+| Scenario | SwiftPM | swifterpm | Time reduction | Speedup |
+|:---|---:|---:|---:|---:|
+| Cold | 37.414 s | 1.203 s | 96.78% | 31.10x |
+| Worktree-warm | 4.439 s | 0.008 s | 99.82% | 522.78x |
 
 GitHubized Tuist fixture:
 
