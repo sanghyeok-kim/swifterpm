@@ -1,4 +1,4 @@
-use std::{fs, path::PathBuf};
+use std::{env, ffi::OsString, fs, path::PathBuf};
 
 use anyhow::{Result, anyhow};
 
@@ -16,9 +16,7 @@ impl Cache {
     pub(crate) fn new(root: Option<PathBuf>) -> Result<Self> {
         let root = match root {
             Some(root) => root,
-            None => dirs::cache_dir()
-                .ok_or_else(|| anyhow!("could not find user cache directory"))?
-                .join("swifterpm"),
+            None => default_cache_root()?,
         };
         fs::create_dir_all(root.join("sources"))?;
         fs::create_dir_all(root.join("archives"))?;
@@ -64,5 +62,60 @@ impl Cache {
                 .join(namespace)
                 .join(format!("{}.lock", stable_hash(key))),
         )
+    }
+}
+
+fn default_cache_root() -> Result<PathBuf> {
+    default_cache_root_from_env(env::var_os("XDG_CACHE_HOME"), env::var_os("HOME"))
+}
+
+fn default_cache_root_from_env(
+    xdg_cache_home: Option<OsString>,
+    home: Option<OsString>,
+) -> Result<PathBuf> {
+    if let Some(xdg_cache_home) = xdg_cache_home {
+        let xdg_cache_home = PathBuf::from(xdg_cache_home);
+        if xdg_cache_home.is_absolute() {
+            return Ok(xdg_cache_home.join("swifterpm"));
+        }
+    }
+
+    home.map(PathBuf::from)
+        .filter(|home| home.is_absolute())
+        .map(|home| home.join(".cache/swifterpm"))
+        .ok_or_else(|| anyhow!("could not find user cache directory from XDG_CACHE_HOME or HOME"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_cache_root_uses_xdg_cache_home() {
+        let got = default_cache_root_from_env(
+            Some(OsString::from("/tmp/xdg-cache")),
+            Some(OsString::from("/tmp/home")),
+        )
+        .unwrap();
+
+        assert_eq!(got, PathBuf::from("/tmp/xdg-cache/swifterpm"));
+    }
+
+    #[test]
+    fn default_cache_root_falls_back_to_home_cache_directory() {
+        let got = default_cache_root_from_env(None, Some(OsString::from("/tmp/home"))).unwrap();
+
+        assert_eq!(got, PathBuf::from("/tmp/home/.cache/swifterpm"));
+    }
+
+    #[test]
+    fn default_cache_root_ignores_relative_xdg_cache_home() {
+        let got = default_cache_root_from_env(
+            Some(OsString::from("relative")),
+            Some(OsString::from("/tmp/home")),
+        )
+        .unwrap();
+
+        assert_eq!(got, PathBuf::from("/tmp/home/.cache/swifterpm"));
     }
 }
