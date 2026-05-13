@@ -107,6 +107,37 @@ macOS release archives are signed and notarized in GitHub Actions when `SWIFTERP
 
 ## Benchmarks
 
+The real-codebase benchmark script is [mise/tasks/benchmark/resolution.sh](mise/tasks/benchmark/resolution.sh). It clones each repository into a temporary directory, removes that directory on exit, and benchmarks:
+
+- cold resolution: package scratch directories and swifterpm's cache are removed before each run
+- worktree-warm resolution: package scratch directories are removed before each run, while already-primed global caches are kept to model switching to another clean worktree
+
+Run it with:
+
+```sh
+mise run benchmark:resolution -- --runs 3
+```
+
+Latest single-run sample, generated on macOS 26.4.1 with Apple Swift 6.3.2 using:
+
+```sh
+mise run benchmark:resolution -- --runs 1 --output-dir /tmp/swifterpm-benchmark-results
+```
+
+Pocket Casts iOS `Modules/Package.swift`:
+
+| Scenario | SwiftPM | swifterpm | Speedup |
+|:---|---:|---:|---:|
+| Cold | 225.498 s | 9.392 s | 24.01x |
+| Worktree-warm | 54.705 s | 0.014 s | 3989.37x |
+
+Firefox iOS root `Package.swift`:
+
+| Scenario | SwiftPM | swifterpm | Speedup |
+|:---|---:|---:|---:|
+| Cold | 37.414 s | 1.203 s | 31.10x |
+| Worktree-warm | 4.439 s | 0.008 s | 522.78x |
+
 GitHubized Tuist fixture:
 
 - 83 pins

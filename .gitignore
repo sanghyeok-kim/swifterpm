@@ -1,5 +1,6 @@
 /target
 /dist
 /.build
+/benchmark-results
 /server
 /xcode_processor
