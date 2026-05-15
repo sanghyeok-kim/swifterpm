@@ -29,12 +29,12 @@ jobs:
       latest-version: ${{ steps.detect.outputs.latest-version }}
       next-version: ${{ steps.detect.outputs.next-version }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Install mise tools
-        uses: jdx/mise-action@v4.0.1
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
           version: ${{ env.MISE_VERSION }}
           cache: true
@@ -64,25 +64,34 @@ jobs:
     defaults:
       run:
         shell: bash
+    # Rust is installed via dtolnay/rust-toolchain rather than mise: the
+    # GitHub-hosted macos-15 (Apple Silicon) image ships a `rustup` that
+    # dispatches to installer (setup) mode, so `rustup target add` fails.
+    # Disabling the mise-managed rust keeps `mise run` from re-triggering it.
+    env:
+      MISE_DISABLE_TOOLS: rust
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@3c5f7ea28cd621ae0bf5283f0e981fb97b8a7af9 # master
+        with:
+          toolchain: "1.94.0"
+          targets: ${{ matrix.target }}
 
       - name: Install mise tools
-        uses: jdx/mise-action@v4.0.1
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
           version: ${{ env.MISE_VERSION }}
           cache: true
-          install_args: rust 1password-cli jq
+          install_args: 1password-cli jq
 
       - name: Cache Rust
-        uses: Swatinem/rust-cache@v2
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2.9.1
         with:
           shared-key: release-${{ matrix.target }}
           cache-on-failure: true
           cache-bin: true
-
-      - name: Add Rust target
-        run: rustup target add ${{ matrix.target }}
 
       - name: Package release archive
         env:
@@ -91,7 +100,7 @@ jobs:
         run: mise run release:package --target "${{ matrix.target }}" --version "${{ needs.detect.outputs.next-version }}"
 
       - name: Upload release asset
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
           name: ${{ matrix.target }}
           path: dist/*
@@ -104,18 +113,18 @@ jobs:
     if: needs.detect.outputs.should-release == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4.3.1
         with:
           fetch-depth: 0
 
       - name: Install mise tools
-        uses: jdx/mise-action@v4.0.1
+        uses: jdx/mise-action@1648a7812b9aeae629881980618f079932869151 # v4.0.1
         with:
           version: ${{ env.MISE_VERSION }}
           cache: true
           install_args: git-cliff
 
-      - uses: actions/download-artifact@v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           path: dist
 
