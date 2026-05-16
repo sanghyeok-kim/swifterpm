@@ -64,6 +64,7 @@ pub(crate) fn resolve_package(
     );
     let mut pins = provider.solve(root_dependencies)?;
     pins.extend(fixed_pins);
+    let mut pins = dedupe_pins_by_identity(pins);
     pins.sort_by(|left, right| left.identity.cmp(&right.identity));
 
     Ok(ResolvedPins {
@@ -71,6 +72,39 @@ pub(crate) fn resolve_package(
         pins,
         version: 3,
     })
+}
+
+/// SwiftPM emits exactly one pin per canonical package identity. The same
+/// package can reach resolution through more than one path under URL spellings
+/// that only differ by a trailing `.git` or by case — for example a versioned
+/// root requirement that PubGrub solves (`krzysztofzablocki/Difference`
+/// `from: 1.0.2`) plus a transitive branch requirement that becomes a fixed pin
+/// (`krzysztofzablocki/Difference.git` `branch: master`). Emitting both makes
+/// SwiftPM reject the lockfile as `duplicated entry for package`. Collapse them
+/// to one pin per identity, preferring the version-resolved entry, which is the
+/// one SwiftPM keeps when a package is constrained by both a version and a
+/// branch requirement.
+fn dedupe_pins_by_identity(pins: Vec<ResolvedPin>) -> Vec<ResolvedPin> {
+    let mut order: Vec<String> = Vec::new();
+    let mut chosen: BTreeMap<String, ResolvedPin> = BTreeMap::new();
+    for pin in pins {
+        let key = pin.identity.to_ascii_lowercase();
+        match chosen.get(&key) {
+            None => {
+                order.push(key.clone());
+                chosen.insert(key, pin);
+            }
+            Some(existing) => {
+                if existing.state.version.is_none() && pin.state.version.is_some() {
+                    chosen.insert(key, pin);
+                }
+            }
+        }
+    }
+    order
+        .into_iter()
+        .filter_map(|key| chosen.remove(&key))
+        .collect()
 }
 
 fn resolve_unversioned_dependency(
@@ -514,4 +548,90 @@ fn origin_hash(package_dir: &Path) -> Result<String> {
     let mut hasher = Sha256::new();
     hasher.update(manifest);
     Ok(hex::encode(hasher.finalize()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn version_pin(identity: &str, location: &str, version: &str) -> ResolvedPin {
+        ResolvedPin {
+            identity: identity.to_string(),
+            kind: "remoteSourceControl".to_string(),
+            location: location.to_string(),
+            state: ResolvedState {
+                branch: None,
+                revision: Some("a".repeat(40)),
+                version: Some(version.to_string()),
+            },
+        }
+    }
+
+    fn branch_pin(identity: &str, location: &str, branch: &str) -> ResolvedPin {
+        ResolvedPin {
+            identity: identity.to_string(),
+            kind: "remoteSourceControl".to_string(),
+            location: location.to_string(),
+            state: ResolvedState {
+                branch: Some(branch.to_string()),
+                revision: Some("b".repeat(40)),
+                version: None,
+            },
+        }
+    }
+
+    #[test]
+    fn collapses_version_and_branch_requirements_for_one_identity() {
+        // Mirrors the Tuist graph: `krzysztofzablocki/Difference` enters as a
+        // versioned root dependency and `Difference.git` enters as a transitive
+        // branch dependency. SwiftPM keeps a single `difference` pin at 1.1.0.
+        let pins = vec![
+            version_pin(
+                "difference",
+                "https://github.com/krzysztofzablocki/difference",
+                "1.1.0",
+            ),
+            branch_pin(
+                "difference",
+                "https://github.com/krzysztofzablocki/Difference.git",
+                "master",
+            ),
+        ];
+
+        let deduped = dedupe_pins_by_identity(pins);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].identity, "difference");
+        assert_eq!(deduped[0].state.version.as_deref(), Some("1.1.0"));
+        assert_eq!(deduped[0].state.branch, None);
+    }
+
+    #[test]
+    fn dedupe_is_case_insensitive_and_order_independent() {
+        let pins = vec![
+            branch_pin("Difference", "https://example.com/Difference.git", "main"),
+            version_pin("difference", "https://example.com/difference", "2.0.0"),
+        ];
+
+        let deduped = dedupe_pins_by_identity(pins);
+
+        assert_eq!(deduped.len(), 1);
+        assert_eq!(deduped[0].state.version.as_deref(), Some("2.0.0"));
+    }
+
+    #[test]
+    fn keeps_distinct_identities_and_lone_branch_pins() {
+        let pins = vec![
+            version_pin("alpha", "https://example.com/alpha", "1.0.0"),
+            branch_pin("beta", "https://example.com/beta", "main"),
+        ];
+
+        let mut deduped = dedupe_pins_by_identity(pins);
+        deduped.sort_by(|left, right| left.identity.cmp(&right.identity));
+
+        assert_eq!(deduped.len(), 2);
+        assert_eq!(deduped[0].identity, "alpha");
+        assert_eq!(deduped[1].identity, "beta");
+        assert_eq!(deduped[1].state.branch.as_deref(), Some("main"));
+    }
 }
