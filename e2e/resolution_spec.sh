@@ -113,10 +113,230 @@ resolve_package() {
     resolve
 }
 
+canonical_path() {
+  local path="$1"
+  mkdir -p "${path}"
+  (cd "${path}" && pwd -P)
+}
+
+normalize_json_file() {
+  local source="$1"
+  local swiftpm_scratch="$2"
+  local swifterpm_scratch="$3"
+  local swiftpm_cache="$4"
+  local swifterpm_cache="$5"
+
+  jq --sort-keys \
+    --arg swiftpm_scratch "${swiftpm_scratch}" \
+    --arg swifterpm_scratch "${swifterpm_scratch}" \
+    --arg swiftpm_cache "${swiftpm_cache}" \
+    --arg swifterpm_cache "${swifterpm_cache}" \
+    '
+      def replace_path($from; $to): split($from) | join($to);
+      walk(
+        if type == "string" then
+          replace_path($swiftpm_scratch; "$SCRATCH")
+          | replace_path($swifterpm_scratch; "$SCRATCH")
+          | replace_path($swiftpm_cache; "$CACHE")
+          | replace_path($swifterpm_cache; "$CACHE")
+        else
+          .
+        end
+      )
+    ' "${source}"
+}
+
+normalize_package_resolved_file() {
+  local source="$1"
+
+  jq --sort-keys '
+    def compact_state:
+      with_entries(select(.value != null));
+
+    def location_identity($location):
+      ($location | split("/")[-1] | sub("\\.git$"; "") | ascii_downcase);
+
+    def pin_location:
+      .location // .repositoryURL // "";
+
+    def pin_identity:
+      if has("identity") then
+        .identity
+      elif has("location") then
+        location_identity(.location)
+      elif has("repositoryURL") then
+        location_identity(.repositoryURL)
+      elif has("package") then
+        (.package | ascii_downcase)
+      else
+        ""
+      end;
+
+    def pin_kind:
+      .kind // (if (pin_location | startswith("/")) then "localSourceControl" else "remoteSourceControl" end);
+
+    def normalize_pin:
+      {
+        identity: pin_identity,
+        kind: pin_kind,
+        location: pin_location,
+        state: (.state | compact_state)
+      };
+
+    {
+      pins: (
+        (if has("object") then .object.pins else .pins end)
+        | map(normalize_pin)
+        | sort_by(.identity, .location)
+      )
+    }
+  ' "${source}"
+}
+
+compare_json_file() {
+  local label="$1"
+  local tmp="$2"
+  local expected="$3"
+  local actual="$4"
+  local swiftpm_scratch="$5"
+  local swifterpm_scratch="$6"
+  local swiftpm_cache="$7"
+  local swifterpm_cache="$8"
+
+  local normalized_dir="${tmp}/normalized-state"
+  mkdir -p "${normalized_dir}"
+
+  local expected_normalized="${normalized_dir}/${label}.swiftpm.json"
+  local actual_normalized="${normalized_dir}/${label}.swifterpm.json"
+  normalize_json_file "${expected}" "${swiftpm_scratch}" "${swifterpm_scratch}" "${swiftpm_cache}" "${swifterpm_cache}" >"${expected_normalized}"
+  normalize_json_file "${actual}" "${swiftpm_scratch}" "${swifterpm_scratch}" "${swiftpm_cache}" "${swifterpm_cache}" >"${actual_normalized}"
+
+  if ! diff -u "${expected_normalized}" "${actual_normalized}"; then
+    return 1
+  fi
+
+  echo "${label}=match"
+}
+
+compare_package_resolved_file() {
+  local label="$1"
+  local tmp="$2"
+  local expected="$3"
+  local actual="$4"
+
+  local normalized_dir="${tmp}/normalized-state"
+  mkdir -p "${normalized_dir}"
+
+  local expected_normalized="${normalized_dir}/${label}.swiftpm.json"
+  local actual_normalized="${normalized_dir}/${label}.swifterpm.json"
+  normalize_package_resolved_file "${expected}" >"${expected_normalized}"
+  normalize_package_resolved_file "${actual}" >"${actual_normalized}"
+
+  if ! diff -u "${expected_normalized}" "${actual_normalized}"; then
+    return 1
+  fi
+
+  echo "${label}=match"
+}
+
+compare_optional_json_file() {
+  local label="$1"
+  local tmp="$2"
+  local expected="$3"
+  local actual="$4"
+  local swiftpm_scratch="$5"
+  local swifterpm_scratch="$6"
+  local swiftpm_cache="$7"
+  local swifterpm_cache="$8"
+
+  if [[ -f "${expected}" && -f "${actual}" ]]; then
+    compare_package_resolved_file "${label}" "${tmp}" "${expected}" "${actual}"
+  elif [[ ! -f "${expected}" && ! -f "${actual}" ]]; then
+    echo "${label}=both-absent"
+  else
+    echo "${label}=presence-mismatch"
+    return 1
+  fi
+}
+
+compare_swiftpm_state_files() {
+  local tmp="$1"
+  local package_dir="$2"
+
+  local swiftpm_scratch="${tmp}/swiftpm-scratch"
+  local swifterpm_scratch="${tmp}/swifterpm-scratch"
+  local swiftpm_cache="${tmp}/swiftpm-cache"
+  local swifterpm_cache="${tmp}/swifterpm-cache"
+  local swiftpm_resolved="${tmp}/Package.swiftpm.resolved"
+  local swifterpm_resolved="${tmp}/Package.swifterpm.resolved"
+
+  rm -f "${package_dir}/Package.resolved"
+  scoped_env "${tmp}" swift package \
+    --package-path "${package_dir}" \
+    --scratch-path "${swiftpm_scratch}" \
+    --cache-path "${swiftpm_cache}" \
+    --disable-scm-to-registry-transformation \
+    resolve >/dev/null 2>"${tmp}/swiftpm-resolve.stderr" || {
+      cat "${tmp}/swiftpm-resolve.stderr" >&2
+      return 1
+    }
+  if [[ -f "${package_dir}/Package.resolved" ]]; then
+    cp "${package_dir}/Package.resolved" "${swiftpm_resolved}"
+  fi
+
+  rm -f "${package_dir}/Package.resolved"
+  scoped_env "${tmp}" "${SWIFTERPM_BIN}" \
+    --package-path "${package_dir}" \
+    --scratch-path "${swifterpm_scratch}" \
+    --cache-path "${swifterpm_cache}" \
+    --disable-package-info-cache \
+    --quiet \
+    resolve >/dev/null
+  if [[ -f "${package_dir}/Package.resolved" ]]; then
+    cp "${package_dir}/Package.resolved" "${swifterpm_resolved}"
+  fi
+
+  swiftpm_scratch="$(canonical_path "${swiftpm_scratch}")"
+  swifterpm_scratch="$(canonical_path "${swifterpm_scratch}")"
+  swiftpm_cache="$(canonical_path "${swiftpm_cache}")"
+  swifterpm_cache="$(canonical_path "${swifterpm_cache}")"
+
+  compare_optional_json_file \
+    "package-resolved" \
+    "${tmp}" \
+    "${swiftpm_resolved}" \
+    "${swifterpm_resolved}" \
+    "${swiftpm_scratch}" \
+    "${swifterpm_scratch}" \
+    "${swiftpm_cache}" \
+    "${swifterpm_cache}" || return 1
+
+  compare_json_file \
+    "workspace-state" \
+    "${tmp}" \
+    "${swiftpm_scratch}/workspace-state.json" \
+    "${swifterpm_scratch}/workspace-state.json" \
+    "${swiftpm_scratch}" \
+    "${swifterpm_scratch}" \
+    "${swiftpm_cache}" \
+    "${swifterpm_cache}"
+}
+
 swiftpm_accepts_lockfile() {
   local tmp="$1"
   local package_dir="$2"
   local cache_dir="$3"
+
+  if [[ ! -f "${package_dir}/Package.resolved" ]]; then
+    scoped_env "${tmp}" swift package \
+      --package-path "${package_dir}" \
+      --scratch-path "${cache_dir}/scratch" \
+      --cache-path "${cache_dir}" \
+      --disable-scm-to-registry-transformation \
+      resolve >/dev/null 2>&1
+    return
+  fi
+
   scoped_env "${tmp}" swift package \
     --package-path "${package_dir}" \
     --scratch-path "${cache_dir}/scratch" \
@@ -128,6 +348,10 @@ swiftpm_accepts_lockfile() {
 
 pin_count() {
   local package_dir="$1"
+  if [[ ! -f "${package_dir}/Package.resolved" ]]; then
+    echo "0"
+    return
+  fi
   jq '.pins | length' "${package_dir}/Package.resolved"
 }
 
@@ -198,7 +422,7 @@ scenario_resolves_swiftpm_external_simple() {
   tag_git_package "${tmp}" "${fixture_dir}/Foo" "1.0.0" "1.1.0" "1.2.0" "1.2.3" || return 1
 
   local package_dir="${fixture_dir}/Bar"
-  resolve_package "${tmp}" "${package_dir}" "${tmp}/cache" || return 1
+  compare_swiftpm_state_files "${tmp}" "${package_dir}" || return 1
   swiftpm_accepts_lockfile "${tmp}" "${package_dir}" "${tmp}/swift-cache" || return 1
 
   echo "pins=$(pin_count "${package_dir}")"
@@ -222,7 +446,7 @@ scenario_resolves_swiftpm_external_complex() {
   done
 
   local package_dir="${fixture_dir}/app"
-  resolve_package "${tmp}" "${package_dir}" "${tmp}/cache" || return 1
+  compare_swiftpm_state_files "${tmp}" "${package_dir}" || return 1
   swiftpm_accepts_lockfile "${tmp}" "${package_dir}" "${tmp}/swift-cache" || return 1
 
   echo "pins=$(pin_count "${package_dir}")"
@@ -242,7 +466,7 @@ scenario_resolves_swiftpm_branch_dependency() {
   init_git_package "${tmp}" "${fixture_dir}/Foo" || return 1
 
   local package_dir="${fixture_dir}/Bar"
-  resolve_package "${tmp}" "${package_dir}" "${tmp}/cache" || return 1
+  compare_swiftpm_state_files "${tmp}" "${package_dir}" || return 1
   swiftpm_accepts_lockfile "${tmp}" "${package_dir}" "${tmp}/swift-cache" || return 1
 
   local revision
@@ -265,7 +489,7 @@ scenario_resolves_swiftpm_local_case_insensitive_dependency() {
   fixture_dir="$(copy_swiftpm_fixture "PackageLookupCaseInsensitive" "${tmp}")" || return 1
 
   local package_dir="${fixture_dir}/pkg"
-  resolve_package "${tmp}" "${package_dir}" "${tmp}/cache" || return 1
+  compare_swiftpm_state_files "${tmp}" "${package_dir}" || return 1
   swiftpm_accepts_lockfile "${tmp}" "${package_dir}" "${tmp}/swift-cache" || return 1
 
   echo "pins=$(pin_count "${package_dir}")"
@@ -294,6 +518,8 @@ Describe "swifterpm resolve against SwiftPM dependency graph fixtures"
     The status should be success
     The output should include "pins=1"
     The output should include "foo-version=1.2.3"
+    The output should include "package-resolved=match"
+    The output should include "workspace-state=match"
     The output should include "force-resolve=ok"
   End
 
@@ -302,6 +528,8 @@ Describe "swifterpm resolve against SwiftPM dependency graph fixtures"
     The status should be success
     The output should include "pins=3"
     The output should include "identities=deck-of-playing-cards fisheryates playingcard"
+    The output should include "package-resolved=match"
+    The output should include "workspace-state=match"
     The output should include "force-resolve=ok"
   End
 
@@ -311,6 +539,8 @@ Describe "swifterpm resolve against SwiftPM dependency graph fixtures"
     The output should include "pins=1"
     The output should include "foo-branch=main"
     The output should include "foo-revision=present"
+    The output should include "package-resolved=match"
+    The output should include "workspace-state=match"
     The output should include "force-resolve=ok"
   End
 
@@ -318,6 +548,8 @@ Describe "swifterpm resolve against SwiftPM dependency graph fixtures"
     When call scenario_resolves_swiftpm_local_case_insensitive_dependency
     The status should be success
     The output should include "pins=0"
+    The output should include "package-resolved=both-absent"
+    The output should include "workspace-state=match"
     The output should include "force-resolve=ok"
   End
 End

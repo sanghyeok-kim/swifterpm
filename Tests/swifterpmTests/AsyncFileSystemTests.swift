@@ -3,7 +3,7 @@ import Testing
 
 struct AsyncFileSystemTests {
     @Test
-    func readsWritesListsAndRemovesFilesWithoutFileManager() async throws {
+    func readsWritesListsAndRemovesFilesWithNIOFileSystem() async throws {
         try await withTemporaryDirectory { root in
             let file = root.appendingPathComponent("nested/file.txt")
             try await AsyncFileSystem.writeData(Data("hello".utf8), to: file)

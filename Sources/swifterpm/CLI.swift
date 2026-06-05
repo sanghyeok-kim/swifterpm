@@ -359,6 +359,7 @@ enum CLIRunner {
                 paths: paths,
                 packageDir: options.packageDir,
                 cacheDir: options.cacheDir,
+                preferResolvedFile: true,
                 write: options.write,
                 restore: options.restore,
                 printOnly: options.printOnly
@@ -372,6 +373,7 @@ enum CLIRunner {
                 paths: paths,
                 packageDir: options.packageDir,
                 cacheDir: options.cacheDir,
+                preferResolvedFile: false,
                 write: options.write,
                 restore: options.restore,
                 printOnly: options.printOnly
@@ -388,9 +390,10 @@ enum CLIRunner {
                 cli: cli, paths: paths, package: package)
             let resolved = try await ResolvedFile.read(packageDir: package)
             try await WorkspaceRestorer.restorePackage(
-                scratchDir: scratch, cache: cache, registryConfig: registryConfig,
+                scratchDir: scratch, packageDir: package, cache: cache, registryConfig: registryConfig,
                 resolved: resolved,
-                quiet: cli.quiet)
+                quiet: cli.quiet,
+                disableSandbox: cli.disableSandbox)
             try await maybeWritePackageInfoCache(
                 cli: cli, paths: paths, package: package, scratch: scratch, resolved: resolved)
             try await WorkspaceRestorer.writeWorkspaceState(
@@ -404,6 +407,7 @@ enum CLIRunner {
         paths: CLIPathResolver,
         packageDir: CLIPath,
         cacheDir: CLIPath?,
+        preferResolvedFile: Bool,
         write: Bool,
         restore: Bool,
         printOnly: Bool
@@ -427,6 +431,10 @@ enum CLIRunner {
             : false
         if readOnly || hasResolvedFile {
             resolved = try await ResolvedFile.read(packageDir: package)
+        } else if preferResolvedFile,
+                  let existing = try await ResolvedFile.readIfCurrent(packageDir: package)
+        {
+            resolved = existing
         } else {
             let progress = cli.quiet ? nil : ResolutionProgressReporter()
             let fresh = try await PackageResolver.resolve(
@@ -444,9 +452,10 @@ enum CLIRunner {
         }
         if shouldRestore(restore: restore, printOnly: printOnly) {
             try await WorkspaceRestorer.restorePackage(
-                scratchDir: scratch, cache: cache, registryConfig: registryConfig,
+                scratchDir: scratch, packageDir: package, cache: cache, registryConfig: registryConfig,
                 resolved: resolved,
-                quiet: cli.quiet)
+                quiet: cli.quiet,
+                disableSandbox: cli.disableSandbox)
             try await maybeWritePackageInfoCache(
                 cli: cli, paths: paths, package: package, scratch: scratch, resolved: resolved)
             try await WorkspaceRestorer.writeWorkspaceState(

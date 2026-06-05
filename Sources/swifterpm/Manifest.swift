@@ -18,6 +18,16 @@ struct ManifestFileSystemDependency: Sendable {
     let path: String
 }
 
+struct ManifestBinaryTarget: Sendable {
+    enum Source: Sendable {
+        case local(path: String)
+        case remote(url: String, checksum: String)
+    }
+
+    let name: String
+    let source: Source
+}
+
 enum Requirement: Sendable {
     case exact(SemVer)
     case range(lower: SemVer, upper: SemVer)
@@ -30,7 +40,8 @@ enum ManifestLoader {
 
     static func dumpPackage(packageDir: URL, disableSandbox: Bool) async throws -> Any {
         let data = try await ManifestLoader.dumpPackageJSON(
-            packageDir: packageDir, disableSandbox: disableSandbox)
+            packageDir: packageDir, disableSandbox: disableSandbox
+        )
         return try JSONSerialization.jsonObject(with: data)
     }
 
@@ -45,9 +56,11 @@ enum ManifestLoader {
         }
         args.append("dump-package")
         let result = try await SystemProcess.run(
-            "/usr/bin/swift", args, workingDirectory: packageDir)
+            "/usr/bin/swift", args, workingDirectory: packageDir
+        )
         try? await AsyncFileSystem.atomicWrite(
-            result.stdout, to: packageDir.appendingPathComponent(cacheFile))
+            result.stdout, to: packageDir.appendingPathComponent(cacheFile)
+        )
         return result.stdout
     }
 
@@ -56,8 +69,8 @@ enum ManifestLoader {
         let manifest = packageDir.appendingPathComponent("Package.swift")
         guard try await AsyncFileSystem.exists(cache) else { return nil }
         guard let cacheDate = try await AsyncFileSystem.modificationDate(cache),
-            let manifestDate = try await AsyncFileSystem.modificationDate(manifest),
-            cacheDate >= manifestDate
+              let manifestDate = try await AsyncFileSystem.modificationDate(manifest),
+              cacheDate >= manifestDate
         else {
             return nil
         }
@@ -66,10 +79,14 @@ enum ManifestLoader {
 }
 
 enum ManifestParser {
+    static func packageName(_ manifest: Any) -> String? {
+        (manifest as? [String: Any])?["name"] as? String
+    }
+
     static func dependencies(_ manifest: Any) throws -> [ManifestDependency] {
         var dependencies: [ManifestDependency] = []
         guard let root = manifest as? [String: Any],
-            let items = root["dependencies"] as? [[String: Any]]
+              let items = root["dependencies"] as? [[String: Any]]
         else {
             return dependencies
         }
@@ -86,12 +103,12 @@ enum ManifestParser {
                     guard let requirementJSON = dependency["requirement"] else {
                         throw ToolError.message("\(identity) is missing requirement")
                     }
-                    dependencies.append(
+                    try dependencies.append(
                         ManifestDependency(
                             identity: identity,
                             kind: .sourceControl,
                             location: location,
-                            requirement: try requirement(requirementJSON)
+                            requirement: requirement(requirementJSON)
                         ))
                 }
             }
@@ -104,12 +121,12 @@ enum ManifestParser {
                     guard let requirementJSON = dependency["requirement"] else {
                         throw ToolError.message("\(identity) is missing requirement")
                     }
-                    dependencies.append(
+                    try dependencies.append(
                         ManifestDependency(
                             identity: identity,
                             kind: .registry,
                             location: identity,
-                            requirement: try requirement(requirementJSON)
+                            requirement: requirement(requirementJSON)
                         ))
                 }
             }
@@ -123,13 +140,13 @@ enum ManifestParser {
             return nil
         }
         if let remote = location["remote"] as? [[String: Any]],
-            let first = remote.first,
-            let url = first["urlString"] as? String
+           let first = remote.first,
+           let url = first["urlString"] as? String
         {
             return url
         }
         if let local = location["local"] as? [String],
-            let first = local.first
+           let first = local.first
         {
             return first
         }
@@ -149,7 +166,7 @@ enum ManifestParser {
 
     private static func activeDependencyReferences(_ manifest: Any) -> Set<String> {
         guard let root = manifest as? [String: Any],
-            let targets = root["targets"] as? [[String: Any]]
+              let targets = root["targets"] as? [[String: Any]]
         else {
             return []
         }
@@ -174,8 +191,8 @@ enum ManifestParser {
 
         while let targetName = pendingTargets.popLast() {
             guard visitedTargets.insert(targetName).inserted,
-                let target = targets.first(where: { $0["name"] as? String == targetName }),
-                let dependencies = target["dependencies"] as? [[String: Any]]
+                  let target = targets.first(where: { $0["name"] as? String == targetName }),
+                  let dependencies = target["dependencies"] as? [[String: Any]]
             else {
                 continue
             }
@@ -189,7 +206,7 @@ enum ManifestParser {
                     }
                 }
                 if let byName = dependency["byName"] as? [Any],
-                    let name = byName.first as? String
+                   let name = byName.first as? String
                 {
                     if targetNames.contains(name) {
                         pendingTargets.append(name)
@@ -210,10 +227,10 @@ enum ManifestParser {
             names.insert(normalizeDependencyReference(String(suffix)))
         }
         if dependency.kind == .sourceControl,
-            let name = dependency.location.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-                .replacingOccurrences(of: ".git", with: "")
-                .split(separator: "/")
-                .last
+           let name = dependency.location.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+           .replacingOccurrences(of: ".git", with: "")
+           .split(separator: "/")
+           .last
         {
             names.insert(normalizeDependencyReference(String(name)))
         }
@@ -227,7 +244,7 @@ enum ManifestParser {
 
     static func fileSystemDependencies(_ manifest: Any) throws -> [ManifestFileSystemDependency] {
         guard let root = manifest as? [String: Any],
-            let items = root["dependencies"] as? [[String: Any]]
+              let items = root["dependencies"] as? [[String: Any]]
         else {
             return []
         }
@@ -254,20 +271,48 @@ enum ManifestParser {
         return dependencies
     }
 
+    static func binaryTargets(_ manifest: Any) throws -> [ManifestBinaryTarget] {
+        guard let root = manifest as? [String: Any],
+              let targets = root["targets"] as? [[String: Any]]
+        else {
+            return []
+        }
+
+        var result: [ManifestBinaryTarget] = []
+        for target in targets where target["type"] as? String == "binary" {
+            guard let name = target["name"] as? String else {
+                throw ToolError.message("binary target is missing name")
+            }
+            if let url = target["url"] as? String {
+                guard let checksum = target["checksum"] as? String else {
+                    throw ToolError.message("\(name) is missing checksum")
+                }
+                result.append(
+                    ManifestBinaryTarget(name: name, source: .remote(url: url, checksum: checksum))
+                )
+            } else if let path = target["path"] as? String {
+                result.append(ManifestBinaryTarget(name: name, source: .local(path: path)))
+            } else {
+                throw ToolError.message("\(name) is missing binary artifact path or URL")
+            }
+        }
+        return result
+    }
+
     static func requirement(_ requirement: Any) throws -> Requirement {
         guard let requirement = requirement as? [String: Any] else {
             throw ToolError.message("unsupported requirement shape: \(requirement)")
         }
         if let exact = requirement["exact"] as? [String], let value = exact.first {
-            return .exact(try SemVer(value))
+            return try .exact(SemVer(value))
         }
         if let range = requirement["range"] as? [[String: Any]], let first = range.first {
             guard let lower = first["lowerBound"] as? String,
-                let upper = first["upperBound"] as? String
+                  let upper = first["upperBound"] as? String
             else {
                 throw ToolError.message("range is missing lowerBound or upperBound")
             }
-            return .range(lower: try SemVer(lower), upper: try SemVer(upper))
+            return try .range(lower: SemVer(lower), upper: SemVer(upper))
         }
         if let revision = requirement["revision"] as? [String], let value = revision.first {
             return .revision(value)
@@ -280,9 +325,9 @@ enum ManifestParser {
 
     static func versionRange(for requirement: Requirement) -> VersionRange? {
         switch requirement {
-        case .exact(let version):
+        case let .exact(version):
             return .singleton(version)
-        case .range(let lower, let upper):
+        case let .range(lower, upper):
             return .between(lower, upper)
         case .revision, .branch:
             return nil
