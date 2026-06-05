@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import SwifterPMCore
 
 struct CacheTests {
     @Test
@@ -24,7 +25,12 @@ struct CacheTests {
             )
             #expect(cache.remoteVersionsPath(location: pin.location).path.hasPrefix(root.path))
             #expect(
-                cache.registryArchivePath(identity: "example.package", version: "1.2.3").path
+                cache.registryArchivePath(
+                    identity: "example.package",
+                    version: "1.2.3",
+                    registryURL: "https://registry.example.com",
+                    checksum: "abcdef1234567890"
+                ).path
                     .hasPrefix(
                         root.path))
             #expect(
@@ -55,7 +61,7 @@ struct CacheTests {
     }
 
     @Test
-    func registrySourcePathRequiresResolvedVersion() async throws {
+    func sourcePathRejectsRegistryPins() async throws {
         try await withTemporaryDirectory { root in
             let cache = try await Cache(root: root)
             let pin = ResolvedPin(
@@ -68,6 +74,48 @@ struct CacheTests {
             #expect(throws: (any Error).self) {
                 try cache.sourcePath(pin: pin)
             }
+        }
+    }
+
+    @Test
+    func registryCachePathsIncludeRegistryURLAndChecksum() async throws {
+        try await withTemporaryDirectory { root in
+            let cache = try await Cache(root: root)
+
+            let source = cache.registrySourcePath(
+                identity: "example.package",
+                version: "1.2.3",
+                registryURL: "https://registry.example.com",
+                checksum: "abcdef1234567890"
+            )
+            let otherRegistrySource = cache.registrySourcePath(
+                identity: "example.package",
+                version: "1.2.3",
+                registryURL: "https://other.example.com",
+                checksum: "abcdef1234567890"
+            )
+            let otherChecksumSource = cache.registrySourcePath(
+                identity: "example.package",
+                version: "1.2.3",
+                registryURL: "https://registry.example.com",
+                checksum: "1234567890abcdef"
+            )
+
+            #expect(source != otherRegistrySource)
+            #expect(source != otherChecksumSource)
+            #expect(
+                cache.registryArchivePath(
+                    identity: "example.package",
+                    version: "1.2.3",
+                    registryURL: "https://registry.example.com",
+                    checksum: "abcdef1234567890"
+                )
+                    != cache.registryArchivePath(
+                        identity: "example.package",
+                        version: "1.2.3",
+                        registryURL: "https://other.example.com",
+                        checksum: "abcdef1234567890"
+                    ))
         }
     }
 }

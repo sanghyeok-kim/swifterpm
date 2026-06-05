@@ -1,4 +1,5 @@
 import Foundation
+@testable import SwifterPMCore
 
 func makeTemporaryDirectory() async throws -> URL {
     let directory = URL(fileURLWithPath: NSTemporaryDirectory())
@@ -24,7 +25,7 @@ func writeCachedManifest(_ manifest: [String: Any], packageDir: URL) async throw
     try await writeMinimalPackageManifest(at: packageDir, name: "Fixture")
     try await AsyncFileSystem.atomicWrite(
         JSONFormatter.prettyData(manifest),
-        to: packageDir.appendingPathComponent(ManifestLoader.cacheFile)
+        to: ManifestLoader.cacheFilePath(packageDir: packageDir)
     )
 }
 

@@ -1,4 +1,6 @@
+import Foundation
 import Testing
+@testable import SwifterPMCore
 
 struct ManifestTests {
     @Test
@@ -119,6 +121,15 @@ struct ManifestTests {
         #expect(dependencies[0].name == "local-dependency")
         #expect(dependencies[1].identity == "named-dependency")
         #expect(dependencies[1].name == "Named")
+    }
+
+    @Test
+    func manifestDumpCacheLivesUnderBuildDirectory() {
+        let packageDir = URL(fileURLWithPath: "/tmp/Package")
+
+        #expect(
+            ManifestLoader.cacheFilePath(packageDir: packageDir).path
+                == "/tmp/Package/.build/swifterpm/manifests/package.json")
     }
 
     @Test

@@ -1,6 +1,11 @@
-import CryptoKit
 import Foundation
 import Subprocess
+
+#if canImport(CryptoKit)
+    import CryptoKit
+#else
+    import Crypto
+#endif
 
 #if canImport(System)
     import System

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import SwifterPMCore
 
 struct RegistryTests {
     @Test
@@ -41,6 +42,21 @@ struct RegistryTests {
             #expect(
                 try config.registryURL(for: "\(scope).package").absoluteString
                     == "https://\(scope).example.com")
+        }
+    }
+
+    @Test
+    func loadAllowsLocalHTTPRegistryURLForTests() async throws {
+        try await withTemporaryDirectory { root in
+            let config = try await RegistryConfig.load(
+                packageDir: root,
+                configPath: nil,
+                defaultRegistryURL: "http://127.0.0.1:8080"
+            )
+
+            #expect(
+                config.sourceControlLookupRegistryURL()?.absoluteString
+                    == "http://127.0.0.1:8080")
         }
     }
 

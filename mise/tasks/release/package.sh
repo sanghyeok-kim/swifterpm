@@ -35,7 +35,6 @@ mask_ci_value() {
 }
 
 mkdir -p dist
-bazel build //:swifterpm
 
 case "${target}" in
   *-windows-*)
@@ -48,7 +47,26 @@ esac
 
 stage_dir="$(mktemp -d)"
 trap 'rm -rf "${stage_dir}"' EXIT
-cp "bazel-bin/swifterpm" "${stage_dir}/${bin_name}"
+
+case "${target}" in
+  x86_64-unknown-linux-gnu)
+    if command -v swift >/dev/null 2>&1; then
+      swift build -c release --product swifterpm
+      cp ".build/release/swifterpm" "${stage_dir}/${bin_name}"
+    else
+      docker run --rm \
+        -v "${PWD}:/workspace" \
+        -v "${stage_dir}:/stage" \
+        -w /workspace \
+        swift:6.1 \
+        bash -lc "swift build -c release --product swifterpm && cp .build/release/swifterpm /stage/${bin_name}"
+    fi
+    ;;
+  *)
+    bazel build //:swifterpm
+    cp "bazel-bin/swifterpm" "${stage_dir}/${bin_name}"
+    ;;
+esac
 
 if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]]; then
   keychain_path="${stage_dir}/signing.keychain"

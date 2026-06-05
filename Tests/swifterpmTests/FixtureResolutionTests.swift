@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import SwifterPMCore
 
 private let packageFixturePaths = [
     "ExternalDependencies",

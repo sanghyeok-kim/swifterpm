@@ -1,4 +1,5 @@
 import Testing
+@testable import SwifterPMCore
 
 struct GitHubTests {
     @Test

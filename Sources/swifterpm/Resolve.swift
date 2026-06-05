@@ -44,11 +44,25 @@ enum PackageResolver {
         cache: Cache,
         registryConfig: RegistryConfig,
         disableSandbox: Bool,
+        scmToRegistryTransformation: SCMToRegistryTransformation = .disabled,
         progress: ResolutionProgressReporter? = nil
     ) async throws -> ResolvedPins {
         let manifest = try await ManifestLoader.dumpPackage(
             packageDir: packageDir, disableSandbox: disableSandbox)
-        let dependencies = try ManifestParser.dependencies(manifest)
+        var manifestDependencies = try ManifestParser.dependencies(manifest)
+        let localPackages = try await ManifestFileSystemDependencyGraph.collect(
+            rootPackageDir: packageDir,
+            rootManifest: manifest,
+            disableSandbox: disableSandbox
+        )
+        for localPackage in localPackages {
+            manifestDependencies.append(contentsOf: try ManifestParser.dependencies(localPackage.manifest))
+        }
+        let dependencies = try await transformedDependencies(
+            manifestDependencies,
+            registryConfig: registryConfig,
+            scmToRegistryTransformation: scmToRegistryTransformation
+        )
         let originHash = try await originHash(packageDir: packageDir)
         guard !dependencies.isEmpty else {
             return ResolvedPins(originHash: originHash, pins: [], version: 3)
@@ -84,6 +98,7 @@ enum PackageResolver {
             registryConfig: registryConfig,
             disableSandbox: disableSandbox,
             rootDirectPackages: rootDirectPackages,
+            scmToRegistryTransformation: scmToRegistryTransformation,
             progress: progress
         )
         var pins = try await provider.solve(rootDependencies: rootDependencies)
@@ -104,6 +119,7 @@ enum PackageResolver {
         let registryConfig: RegistryConfig
         let disableSandbox: Bool
         let rootDirectPackages: Set<PackageKey>
+        let scmToRegistryTransformation: SCMToRegistryTransformation
         let progress: ResolutionProgressReporter?
 
         private var versions: [PackageKey: [ResolvedVersion]] = [:]
@@ -113,12 +129,14 @@ enum PackageResolver {
         init(
             cache: Cache, registryConfig: RegistryConfig, disableSandbox: Bool,
             rootDirectPackages: Set<PackageKey>,
+            scmToRegistryTransformation: SCMToRegistryTransformation,
             progress: ResolutionProgressReporter?
         ) {
             self.cache = cache
             self.registryConfig = registryConfig
             self.disableSandbox = disableSandbox
             self.rootDirectPackages = rootDirectPackages
+            self.scmToRegistryTransformation = scmToRegistryTransformation
             self.progress = progress
             versions[.root] = [
                 ResolvedVersion(version: SemVer(major: 0, minor: 0, patch: 0), revision: nil)
@@ -269,10 +287,15 @@ enum PackageResolver {
             let source = try await manifestSource(package: package, version: version)
             let manifest = try await ManifestLoader.dumpPackage(
                 packageDir: source, disableSandbox: disableSandbox)
-            let manifestDependencies =
+            let rawManifestDependencies =
                 rootDirectPackages.contains(package)
                 ? try ManifestParser.dependencies(manifest)
                 : try ManifestParser.requiredDependencies(manifest)
+            let manifestDependencies = try await PackageResolver.transformedDependencies(
+                rawManifestDependencies,
+                registryConfig: registryConfig,
+                scmToRegistryTransformation: scmToRegistryTransformation
+            )
 
             var result: [(PackageKey, VersionRange)] = []
             for dependency in manifestDependencies {
@@ -409,6 +432,55 @@ enum PackageResolver {
             location: dependency.location,
             state: state
         )
+    }
+
+    static func transformedDependencies(
+        _ dependencies: [ManifestDependency],
+        registryConfig: RegistryConfig,
+        scmToRegistryTransformation: SCMToRegistryTransformation,
+        registryIdentityLookup: @Sendable @escaping (String, RegistryConfig) async throws
+            -> [String] = { sourceControlURL, registryConfig in
+                try await RegistryClient.identifiers(
+                    sourceControlURL: sourceControlURL,
+                    registryConfig: registryConfig
+                )
+            }
+    ) async throws -> [ManifestDependency] {
+        guard scmToRegistryTransformation != .disabled else {
+            return dependencies
+        }
+
+        return try await ConcurrentTasks.map(dependencies) { dependency in
+            guard dependency.kind == .sourceControl,
+                  ManifestParser.versionRange(for: dependency.requirement) != nil
+            else {
+                return dependency
+            }
+
+            let identifiers = try await registryIdentityLookup(dependency.location, registryConfig)
+            guard let registryIdentity = identifiers.sorted().first else {
+                return dependency
+            }
+
+            switch scmToRegistryTransformation {
+            case .disabled:
+                return dependency
+            case .useRegistryIdentityForSCM:
+                return ManifestDependency(
+                    identity: registryIdentity,
+                    kind: .sourceControl,
+                    location: dependency.location,
+                    requirement: dependency.requirement
+                )
+            case .replaceSCMWithRegistry:
+                return ManifestDependency(
+                    identity: registryIdentity,
+                    kind: .registry,
+                    location: registryIdentity,
+                    requirement: dependency.requirement
+                )
+            }
+        }
     }
 
     private static func dedupePinsByIdentity(_ pins: [ResolvedPin]) -> [ResolvedPin] {

@@ -1,7 +1,7 @@
 import ArgumentParser
 import Foundation
 
-let swifterpmVersion = "0.1.0"
+public let swifterpmVersion = "0.5.1"
 
 struct CLIPath: Equatable, Sendable {
     let rawValue: String
@@ -92,8 +92,8 @@ enum CLIAction: String, ExpressibleByArgument {
     case restore
 }
 
-struct SwifterPMCommand: AsyncParsableCommand {
-    static let configuration = CommandConfiguration(
+public struct SwifterPMCommand: AsyncParsableCommand {
+    public static let configuration = CommandConfiguration(
         commandName: "swifterpm",
         abstract: "Resolve and restore Swift package dependencies.",
         version: swifterpmVersion
@@ -168,11 +168,13 @@ struct SwifterPMCommand: AsyncParsableCommand {
     @Argument(parsing: .allUnrecognized)
     var commandArguments: [String] = []
 
-    mutating func run() async throws {
+    public init() {}
+
+    public mutating func run() async throws {
         try await runAsync()
     }
 
-    mutating func runAsync() async throws {
+    public mutating func runAsync() async throws {
         try await CLIRunner.run(try makeCLI())
     }
 
@@ -440,6 +442,7 @@ enum CLIRunner {
             let fresh = try await PackageResolver.resolve(
                 packageDir: package, cache: cache, registryConfig: registryConfig,
                 disableSandbox: cli.disableSandbox,
+                scmToRegistryTransformation: try scmToRegistryTransformation(cli),
                 progress: progress)
             if shouldWrite(write: write, printOnly: printOnly) {
                 try await ResolvedFile.write(packageDir: package, resolved: fresh)
@@ -478,6 +481,26 @@ enum CLIRunner {
             disableSandbox: cli.disableSandbox,
             quiet: cli.quiet
         )
+    }
+
+    private static func scmToRegistryTransformation(_ cli: CLI) throws
+        -> SCMToRegistryTransformation
+    {
+        let enabled = [
+            cli.replaceSCMWithRegistry,
+            cli.useRegistryIdentityForSCM,
+            cli.disableSCMToRegistryTransformation,
+        ].filter { $0 }.count
+        if enabled > 1 {
+            throw ToolError.message("source-control to registry transformation flags conflict")
+        }
+        if cli.replaceSCMWithRegistry {
+            return .replaceSCMWithRegistry
+        }
+        if cli.useRegistryIdentityForSCM {
+            return .useRegistryIdentityForSCM
+        }
+        return .disabled
     }
 
     private static func ensureWholePackageResolution(

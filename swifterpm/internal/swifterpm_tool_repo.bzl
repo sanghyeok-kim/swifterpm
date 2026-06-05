@@ -1,6 +1,6 @@
 """Repository rule that exposes SwifterPM-backed package resolve helpers."""
 
-DEFAULT_SWIFTERPM_VERSION = "0.1.0"
+DEFAULT_SWIFTERPM_VERSION = "0.5.1"
 DEFAULT_RELEASE_URL_TEMPLATE = "https://github.com/tuist/swifterpm/releases/download/{version}/swifterpm-{version}-{target}.tar.gz"
 
 TOOL_CONFIG_DEFAULTS = {
