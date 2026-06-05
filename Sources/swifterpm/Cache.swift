@@ -40,11 +40,7 @@ struct Cache: Sendable {
 
     func sourcePath(pin: ResolvedPin) throws -> URL {
         if pin.kind == "registry" {
-            return
-                try root
-                    .appendingPathComponent("sources")
-                    .appendingPathComponent(pin.identity)
-                    .appendingPathComponent("\(pin.versionString())-registry")
+            throw ToolError.message("registry source paths require registry URL and checksum")
         }
         let version = pin.state.version ?? pin.state.branch ?? "revision"
         return
@@ -61,10 +57,41 @@ struct Cache: Sendable {
                 "\(Hashing.stable(url))-\(Hashing.shortRevision(revision)).tar.gz")
     }
 
-    func registryArchivePath(identity: String, version: String) -> URL {
+    func registrySourcePath(
+        identity: String,
+        version: String,
+        registryURL: String,
+        checksum: String
+    ) -> URL {
+        root
+            .appendingPathComponent("sources")
+            .appendingPathComponent(identity)
+            .appendingPathComponent(
+                [
+                    version,
+                    String(Hashing.stable(registryURL).prefix(12)),
+                    checksum,
+                    "registry",
+                ].joined(separator: "-")
+            )
+    }
+
+    func registryArchivePath(
+        identity: String,
+        version: String,
+        registryURL: String,
+        checksum: String
+    ) -> URL {
         root
             .appendingPathComponent("registry/archives")
-            .appendingPathComponent("\(Hashing.stable(identity))-\(version).zip")
+            .appendingPathComponent(
+                [
+                    Hashing.stable(identity),
+                    version,
+                    String(Hashing.stable(registryURL).prefix(12)),
+                    checksum,
+                ].joined(separator: "-") + ".zip"
+            )
     }
 
     func binaryArtifactArchivePath(url: String, checksum: String) -> URL {

@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import SwifterPMCore
 
 struct RestoreTests {
     @Test
@@ -124,6 +125,73 @@ struct RestoreTests {
     }
 
     @Test
+    func writeWorkspaceStateIncludesTransitiveFileSystemDependencies() async throws {
+        try await withTemporaryDirectory { root in
+            let package = root.appendingPathComponent("Package")
+            let localOne = package.appendingPathComponent("LocalOne")
+            let localTwo = package.appendingPathComponent("LocalTwo")
+            let scratch = root.appendingPathComponent("scratch")
+            var rootManifest = emptyManifest()
+            rootManifest["dependencies"] = [
+                [
+                    "fileSystem": [
+                        [
+                            "identity": "local-one",
+                            "path": "LocalOne",
+                        ],
+                    ]
+                ],
+            ]
+            var localOneManifest = emptyManifest(name: "LocalOne")
+            localOneManifest["dependencies"] = [
+                [
+                    "fileSystem": [
+                        [
+                            "identity": "local-two",
+                            "path": "../LocalTwo",
+                        ],
+                    ]
+                ],
+            ]
+
+            try await writeCachedManifest(rootManifest, packageDir: package)
+            try await writeCachedManifest(localOneManifest, packageDir: localOne)
+            try await writeCachedManifest(emptyManifest(name: "LocalTwo"), packageDir: localTwo)
+
+            try await WorkspaceRestorer.writeWorkspaceState(
+                packageDir: package,
+                scratchDir: scratch,
+                resolved: ResolvedPins(originHash: "origin", pins: [], version: 3),
+                disableSandbox: false
+            )
+
+            let statePath = scratch.appendingPathComponent("workspace-state.json")
+            let state = try #require(
+                try JSONSerialization.jsonObject(
+                    with: await AsyncFileSystem.readData(from: statePath))
+                    as? [String: Any])
+            let object = try #require(state["object"] as? [String: Any])
+            let dependencies = try #require(object["dependencies"] as? [[String: Any]])
+            let refs = dependencies.compactMap { $0["packageRef"] as? [String: Any] }
+            let refsByIdentity = Dictionary(
+                uniqueKeysWithValues: refs.compactMap { ref -> (String, [String: Any])? in
+                    guard let identity = ref["identity"] as? String else { return nil }
+                    return (identity, ref)
+                }
+            )
+
+            #expect(Set(refsByIdentity.keys) == ["local-one", "local-two"])
+            let expectedLocalOne = PathCanonicalizer.realpath(localOne).path
+            let expectedLocalTwo = PathCanonicalizer.realpath(localTwo).path
+            #expect(refsByIdentity["local-one"]?["location"] as? String == expectedLocalOne)
+            #expect(refsByIdentity["local-two"]?["location"] as? String == expectedLocalTwo)
+            #expect(
+                Set(dependencies.compactMap { ($0["state"] as? [String: Any])?["path"] as? String })
+                    == [expectedLocalOne, expectedLocalTwo])
+        }
+    }
+
+    @Test
     func writeWorkspaceStateWritesRootLocalBinaryArtifacts() async throws {
         try await withTemporaryDirectory { root in
             let package = root.appendingPathComponent("Package")
@@ -174,10 +242,14 @@ struct RestoreTests {
             let scratch = root.appendingPathComponent("scratch")
             let cache = try await Cache(root: root.appendingPathComponent("cache"))
             let pin = ResolvedPin(
-                identity: "example.binary",
-                kind: "registry",
-                location: "",
-                state: ResolvedState(branch: nil, revision: nil, version: "1.0.0")
+                identity: "binary",
+                kind: "remoteSourceControl",
+                location: "https://github.com/example/binary.git",
+                state: ResolvedState(
+                    branch: nil,
+                    revision: "abcdef1234567890",
+                    version: "1.0.0"
+                )
             )
             let artifactURL = "https://example.com/Foo.zip"
 
@@ -223,13 +295,13 @@ struct RestoreTests {
             let packageRef = try #require(artifact["packageRef"] as? [String: Any])
             let source = try #require(artifact["source"] as? [String: Any])
             let artifactPath = scratch
-                .appendingPathComponent("artifacts/example.binary/Foo/Foo.xcframework")
+                .appendingPathComponent("artifacts/binary/Foo/Foo.xcframework")
 
             #expect(artifacts.count == 1)
             #expect(artifact["targetName"] as? String == "Foo")
             #expect(artifact["path"] as? String == artifactPath.path)
-            #expect(packageRef["kind"] as? String == "registry")
-            #expect(packageRef["location"] as? String == "example.binary")
+            #expect(packageRef["kind"] as? String == "remoteSourceControl")
+            #expect(packageRef["location"] as? String == "https://github.com/example/binary.git")
             #expect(source["type"] as? String == "remote")
             #expect(source["url"] as? String == artifactURL)
             #expect(source["checksum"] as? String == checksum)

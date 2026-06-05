@@ -63,3 +63,6 @@ jobs:
 
       - name: Build
         run: bazel build //:swifterpm //:swifterpm_macos
+
+      - name: Build Swift package
+        run: swift build --product swifterpm

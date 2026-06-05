@@ -1,4 +1,5 @@
 import ArgumentParser
+import SwifterPMCore
 
 do {
     var command = try SwifterPMCommand.parse()

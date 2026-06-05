@@ -33,6 +33,10 @@ struct RegistryConfig: Sendable {
         throw ToolError.message("no registry configured for '\(scope)' scope")
     }
 
+    func sourceControlLookupRegistryURL() -> URL? {
+        defaultRegistryURL
+    }
+
     private mutating func mergeFile(_ path: URL) async throws {
         guard try await AsyncFileSystem.exists(path) else { return }
         guard
@@ -58,7 +62,9 @@ struct RegistryConfig: Sendable {
     }
 
     private static func parseRegistryURL(_ url: String) throws -> URL {
-        guard let parsed = URL(string: url), parsed.scheme == "https" else {
+        guard let parsed = URL(string: url),
+              parsed.scheme == "https" || (parsed.scheme == "http" && parsed.isLocalhost)
+        else {
             throw ToolError.message("registry URL must use https: \(url)")
         }
         return parsed
@@ -79,6 +85,11 @@ struct RegistryConfig: Sendable {
     }
 }
 
+struct RegistrySourceArchive: Sendable {
+    let registryURL: URL
+    let checksum: String
+}
+
 struct RegistryVersion: Codable, Sendable {
     let version: String
 
@@ -94,6 +105,31 @@ private struct RegistryVersionsCache: Codable {
 }
 
 enum RegistryClient {
+    static func identifiers(
+        sourceControlURL: String,
+        registryConfig: RegistryConfig
+    ) async throws -> [String] {
+        guard let registryURL = registryConfig.sourceControlLookupRegistryURL() else {
+            return []
+        }
+        struct IdentifiersResponse: Decodable {
+            let identifiers: [String]
+        }
+
+        do {
+            let data = try await HTTPClient.data(
+                url: try identifiersURL(
+                    registryURL: registryURL,
+                    sourceControlURL: sourceControlURL
+                ),
+                headers: ["Accept": "application/vnd.swift.registry.v1+json"]
+            )
+            return try JSONDecoder().decode(IdentifiersResponse.self, from: data).identifiers
+        } catch ToolError.message(let message) where message.hasPrefix("HTTP 404 ") {
+            return []
+        }
+    }
+
     static func versions(identity: String, registryConfig: RegistryConfig, cache: Cache)
         async throws
         -> [RegistryVersion]
@@ -119,21 +155,41 @@ enum RegistryClient {
         return versions
     }
 
-    static func downloadArchive(
-        cache: Cache,
+    static func sourceArchive(
         registryConfig: RegistryConfig,
         identity: String,
+        version: String
+    ) async throws -> RegistrySourceArchive {
+        let registryURL = try registryConfig.registryURL(for: identity)
+        return RegistrySourceArchive(
+            registryURL: registryURL,
+            checksum: try await fetchSourceArchiveChecksum(
+                registryURL: registryURL,
+                identity: identity,
+                version: version
+            )
+        )
+    }
+
+    static func downloadArchive(
+        cache: Cache,
+        registryURL: URL,
+        identity: String,
         version: String,
+        expectedChecksum: String,
         destination: URL
     ) async throws {
-        let registryURL = try registryConfig.registryURL(for: identity)
-        let archivePath = cache.registryArchivePath(identity: identity, version: version)
-        if !(try await AsyncFileSystem.exists(archivePath)) {
+        let archivePath = cache.registryArchivePath(
+            identity: identity,
+            version: version,
+            registryURL: registryURL.absoluteString,
+            checksum: expectedChecksum
+        )
+        if try await !validCachedArchive(archivePath, expectedChecksum: expectedChecksum) {
             let lock = try await cache.lock(namespace: "registry-archives", key: archivePath.path)
             _ = lock
-            if !(try await AsyncFileSystem.exists(archivePath)) {
-                let expectedChecksum = try await fetchSourceArchiveChecksum(
-                    registryURL: registryURL, identity: identity, version: version)
+            if try await !validCachedArchive(archivePath, expectedChecksum: expectedChecksum) {
+                try? await AsyncFileSystem.removePath(archivePath)
                 let data = try await fetchRegistryArchive(
                     registryURL: registryURL, identity: identity, version: version)
                 let actual = Hashing.sha256Hex(data)
@@ -149,6 +205,20 @@ enum RegistryClient {
         try await SystemProcess.run(
             "/usr/bin/unzip", ["-q", archivePath.path, "-d", destination.path])
         try await AsyncFileSystem.flattenSingleDirectory(destination)
+    }
+
+    private static func validCachedArchive(_ archivePath: URL, expectedChecksum: String)
+        async throws -> Bool
+    {
+        guard try await AsyncFileSystem.exists(archivePath) else {
+            return false
+        }
+        let actual = try Hashing.sha256Hex(fileAt: archivePath)
+        if actual.caseInsensitiveCompare(expectedChecksum) == .orderedSame {
+            return true
+        }
+        try? await AsyncFileSystem.removePath(archivePath)
+        return false
     }
 
     private static func fetchRegistryVersions(registryURL: URL, identity: String) async throws
@@ -218,6 +288,18 @@ enum RegistryClient {
         return registryURL.appendingPathComponents(components)
     }
 
+    private static func identifiersURL(registryURL: URL, sourceControlURL: String) throws -> URL {
+        var components = URLComponents(
+            url: registryURL.appendingPathComponent("identifiers"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [URLQueryItem(name: "url", value: sourceControlURL)]
+        guard let url = components?.url else {
+            throw ToolError.message("invalid registry identifier lookup URL")
+        }
+        return url
+    }
+
     private static func readCachedRegistryVersions(
         cache: Cache, registryURL: String, identity: String
     ) async throws -> [RegistryVersion]? {
@@ -246,5 +328,12 @@ enum RegistryClient {
             + Data("\n".utf8)
         try await AsyncFileSystem.atomicWrite(
             data, to: cache.registryVersionsPath(registryURL: registryURL, identity: identity))
+    }
+}
+
+extension URL {
+    fileprivate var isLocalhost: Bool {
+        guard let host = host?.lowercased() else { return false }
+        return host == "localhost" || host == "127.0.0.1" || host == "::1"
     }
 }

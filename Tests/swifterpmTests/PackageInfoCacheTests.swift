@@ -1,5 +1,6 @@
 import Foundation
 import Testing
+@testable import SwifterPMCore
 
 struct PackageInfoCacheTests {
     @Test
@@ -67,7 +68,7 @@ struct PackageInfoCacheTests {
             #expect(rootInfo["name"] as? String == "CachedRoot")
             #expect(
                 try await AsyncFileSystem.exists(
-                    package.appendingPathComponent(ManifestLoader.cacheFile)) == false)
+                    ManifestLoader.cacheFilePath(packageDir: package)) == false)
         }
     }
 
@@ -113,7 +114,7 @@ struct PackageInfoCacheTests {
             #expect(dependencyInfo["name"] as? String == "CachedDependency")
             #expect(
                 try await AsyncFileSystem.exists(
-                    checkout.appendingPathComponent(ManifestLoader.cacheFile)) == false)
+                    ManifestLoader.cacheFilePath(packageDir: checkout)) == false)
         }
     }
 
@@ -199,11 +200,69 @@ struct PackageInfoCacheTests {
                 ])
             #expect(
                 packages.first?["package_path"] as? String
-                    == localOne.standardizedFileURL.path)
+                    == PathCanonicalizer.realpath(localOne).path)
             for package in packages {
                 let packageInfoPath = try #require(package["package_info_path"] as? String)
                 #expect(try await AsyncFileSystem.exists(URL(fileURLWithPath: packageInfoPath)))
             }
+        }
+    }
+
+    @Test
+    func writePackageInfoCacheIncludesTransitiveLocalFileSystemDependencies() async throws {
+        try await withTemporaryDirectory { root in
+            let package = root.appendingPathComponent("Package")
+            let scratch = root.appendingPathComponent("scratch")
+            let cacheDir = root.appendingPathComponent("package-info")
+            let localOne = package.appendingPathComponent("LocalOne")
+            let localTwo = package.appendingPathComponent("LocalTwo")
+            var rootManifest = emptyManifest()
+            rootManifest["dependencies"] = [
+                [
+                    "fileSystem": [
+                        [
+                            "identity": "local-one",
+                            "path": "LocalOne",
+                        ],
+                    ]
+                ],
+            ]
+            var localOneManifest = emptyManifest(name: "LocalOne")
+            localOneManifest["dependencies"] = [
+                [
+                    "fileSystem": [
+                        [
+                            "identity": "local-two",
+                            "path": "../LocalTwo",
+                        ],
+                    ]
+                ],
+            ]
+
+            try await writeCachedManifest(rootManifest, packageDir: package)
+            try await writeCachedManifest(localOneManifest, packageDir: localOne)
+            try await writeCachedManifest(emptyManifest(name: "LocalTwo"), packageDir: localTwo)
+
+            try await PackageInfoCacheWriter.write(
+                packageDir: package,
+                scratchDir: scratch,
+                resolved: ResolvedPins(originHash: "origin", pins: [], version: 3),
+                cacheDir: cacheDir,
+                disableSandbox: false,
+                quiet: true
+            )
+
+            let index = try #require(
+                JSONSerialization.jsonObject(
+                    with: try await AsyncFileSystem.readData(
+                        from: cacheDir.appendingPathComponent("index.json")))
+                    as? [String: Any])
+            let packages = try #require(index["packages"] as? [[String: Any]])
+
+            #expect(
+                packages.compactMap { $0["identity"] as? String } == [
+                    "local-one", "local-two",
+                ])
         }
     }
 

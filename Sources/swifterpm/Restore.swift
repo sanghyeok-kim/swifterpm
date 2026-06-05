@@ -287,22 +287,19 @@ enum WorkspaceRestorer {
                 packageDir: packageDir,
                 disableSandbox: disableSandbox
             )
-            for dependency in try ManifestParser.fileSystemDependencies(manifest) {
-                let dependencyPath = packagePathForFileSystemDependency(
-                    rootPackageDir: packageDir,
-                    dependency: dependency
-                )
-                let dependencyManifest = try await ManifestLoader.dumpPackage(
-                    packageDir: dependencyPath,
-                    disableSandbox: disableSandbox
-                )
+            for localPackage in try await ManifestFileSystemDependencyGraph.collect(
+                rootPackageDir: packageDir,
+                rootManifest: manifest,
+                disableSandbox: disableSandbox
+            ) {
                 contexts.append(
                     PackageContext(
                         packageRef: fileSystemPackageRef(
-                            dependency,
-                            name: ManifestParser.packageName(dependencyManifest)
+                            localPackage.dependency,
+                            packagePath: localPackage.packagePath,
+                            name: ManifestParser.packageName(localPackage.manifest)
                         ),
-                        packagePath: dependencyPath,
+                        packagePath: localPackage.packagePath,
                         canonicalizeLocalBinaryPaths: true
                     ))
             }
@@ -338,20 +335,9 @@ enum WorkspaceRestorer {
         ]
     }
 
-    private static func packagePathForFileSystemDependency(
-        rootPackageDir: URL,
-        dependency: ManifestFileSystemDependency
-    ) -> URL {
-        if dependency.path.hasPrefix("/") {
-            return URL(fileURLWithPath: dependency.path)
-        }
-        return rootPackageDir
-            .appendingPathComponent(dependency.path)
-            .standardizedFileURL
-    }
-
     private static func fileSystemPackageRef(
         _ dependency: ManifestFileSystemDependency,
+        packagePath: URL,
         name: String? = nil
     )
         -> [String: String]
@@ -359,7 +345,7 @@ enum WorkspaceRestorer {
         [
             "identity": dependency.identity,
             "kind": "fileSystem",
-            "location": dependency.path,
+            "location": packagePath.path,
             "name": name ?? dependency.name,
         ]
     }
@@ -580,7 +566,18 @@ enum WorkspaceRestorer {
     static func ensureRegistrySource(cache: Cache, registryConfig: RegistryConfig, pin: ResolvedPin)
         async throws -> URL
     {
-        let destination = try cache.sourcePath(pin: pin)
+        let version = try pin.versionString()
+        let archive = try await RegistryClient.sourceArchive(
+            registryConfig: registryConfig,
+            identity: pin.identity,
+            version: version
+        )
+        let destination = cache.registrySourcePath(
+            identity: pin.identity,
+            version: version,
+            registryURL: archive.registryURL.absoluteString,
+            checksum: archive.checksum
+        )
         let manifest = destination.appendingPathComponent("Package.swift")
         if try await AsyncFileSystem.exists(manifest) {
             return destination
@@ -601,9 +598,10 @@ enum WorkspaceRestorer {
         do {
             try await RegistryClient.downloadArchive(
                 cache: cache,
-                registryConfig: registryConfig,
+                registryURL: archive.registryURL,
                 identity: pin.identity,
-                version: pin.versionString(),
+                version: version,
+                expectedChecksum: archive.checksum,
                 destination: temp
             )
 
@@ -781,27 +779,24 @@ enum WorkspaceRestorer {
         let manifest = try await ManifestLoader.dumpPackage(
             packageDir: packageDir, disableSandbox: disableSandbox
         )
-        for dependency in try ManifestParser.fileSystemDependencies(manifest) {
-            let dependencyPath = packagePathForFileSystemDependency(
-                rootPackageDir: packageDir,
-                dependency: dependency
-            )
-            let dependencyManifest = try await ManifestLoader.dumpPackage(
-                packageDir: dependencyPath,
-                disableSandbox: disableSandbox
-            )
+        for localPackage in try await ManifestFileSystemDependencyGraph.collect(
+            rootPackageDir: packageDir,
+            rootManifest: manifest,
+            disableSandbox: disableSandbox
+        ) {
             let ref = fileSystemPackageRef(
-                dependency,
-                name: ManifestParser.packageName(dependencyManifest)
+                localPackage.dependency,
+                packagePath: localPackage.packagePath,
+                name: ManifestParser.packageName(localPackage.manifest)
             )
             dependencies.append([
                 "basedOn": NSNull(),
                 "packageRef": ref,
                 "state": [
                     "name": "fileSystem",
-                    "path": dependency.path,
+                    "path": localPackage.packagePath.path,
                 ],
-                "subpath": dependency.identity,
+                "subpath": localPackage.dependency.identity,
             ])
         }
         dependencies.sort { jsonPackageIdentity($0) < jsonPackageIdentity($1) }

@@ -81,30 +81,41 @@ enum PackageInfoCacheWriter {
         }.sorted { $0.identity < $1.identity }
 
         var allPackages = packages
-        var localDependencies = try ManifestParser.fileSystemDependencies(rootManifest)
-        localDependencies.sort { $0.identity < $1.identity }
-        let localPackages = try await ConcurrentTasks.map(localDependencies) { dependency in
-            let packagePath = packagePathForFileSystemDependency(
-                rootPackageDir: packageDir, dependency: dependency)
-            let dependencyHash = String(Hashing.stable(dependency.path).prefix(16))
+        let localDependencies = try await ManifestFileSystemDependencyGraph.collect(
+            rootPackageDir: packageDir,
+            rootManifest: rootManifest,
+            disableSandbox: disableSandbox
+        )
+        let unsortedLocalPackages: [PackageInfoEntry] = try await ConcurrentTasks.map(localDependencies) {
+            localPackage -> PackageInfoEntry in
+            let packagePath = localPackage.packagePath
+            let dependency = localPackage.dependency
+            let dependencyHashInput = Hashing.stable(packagePath.path)
+            let dependencyHash = String(dependencyHashInput.prefix(16))
+            let safeIdentity = SafeFileName.make(dependency.identity)
+            let packageInfoFileName = "\(safeIdentity)-\(dependencyHash).json"
             let packageInfoPath =
                 cacheDir
                 .appendingPathComponent("packages")
-                .appendingPathComponent(
-                    "\(SafeFileName.make(dependency.identity))-\(dependencyHash).json"
-                )
+                .appendingPathComponent(packageInfoFileName)
             _ = try await cachedOrDumpPackageJSON(
                 packageDir: packagePath, destination: packageInfoPath,
                 disableSandbox: disableSandbox)
-            return PackageInfoEntry(
+            let entry = PackageInfoEntry(
                 identity: dependency.identity,
                 kind: "fileSystem",
-                location: dependency.path,
+                location: packagePath.path,
                 version: nil,
                 revision: nil,
                 packagePath: packagePath.path,
                 packageInfoPath: packageInfoPath.path
             )
+            return entry
+        }
+        let localPackages = unsortedLocalPackages.sorted {
+            $0.identity == $1.identity
+                ? $0.packagePath < $1.packagePath
+                : $0.identity < $1.identity
         }
         allPackages.append(contentsOf: localPackages)
 
@@ -145,17 +156,6 @@ enum PackageInfoCacheWriter {
             scratchDir
             .appendingPathComponent("checkouts")
             .appendingPathComponent(PinKind.checkoutDirectoryName(pin))
-    }
-
-    private static func packagePathForFileSystemDependency(
-        rootPackageDir: URL, dependency: ManifestFileSystemDependency
-    ) -> URL {
-        if dependency.path.hasPrefix("/") {
-            return URL(fileURLWithPath: dependency.path)
-        }
-        return rootPackageDir
-            .appendingPathComponent(dependency.path)
-            .standardizedFileURL
     }
 
     private static func cachedOrDumpPackageJSON(

@@ -18,6 +18,7 @@ FIREFOX_IOS_SHA="d97982a167c3e15393607e027eca7f92b53dcad8"
 FIREFOX_IOS_MANIFEST_PATH="Package.swift"
 
 SWIFTPM_FIXTURES="${PWD}/e2e/fixtures/swiftpm/DependencyResolution/External"
+SWIFTERPM_FIXTURES="${PWD}/e2e/fixtures/swifterpm"
 
 prepare_isolated_state() {
   local tmp="$1"
@@ -77,6 +78,15 @@ copy_swiftpm_fixture() {
   echo "${fixture_dir}"
 }
 
+copy_swifterpm_fixture() {
+  local name="$1"
+  local tmp="$2"
+  local fixture_dir="${tmp}/${name}"
+
+  cp -R "${SWIFTERPM_FIXTURES}/${name}" "${fixture_dir}"
+  echo "${fixture_dir}"
+}
+
 init_git_package() {
   local tmp="$1"
   local package_dir="$2"
@@ -98,6 +108,58 @@ tag_git_package() {
   for tag in "$@"; do
     scoped_env "${tmp}" git -C "${package_dir}" tag "${tag}"
   done
+}
+
+start_registry_server() {
+  local tmp="$1"
+  local registry_dir="$2"
+
+  python3 "${SWIFTERPM_FIXTURES}/registry-server.py" "${registry_dir}" >"${tmp}/registry.port" 2>"${tmp}/registry.log" &
+  REGISTRY_SERVER_PID="$!"
+  export REGISTRY_SERVER_PID
+  for _ in {1..100}; do
+    if [[ -s "${tmp}/registry.port" ]]; then
+      REGISTRY_SERVER_PORT="$(cat "${tmp}/registry.port")"
+      export REGISTRY_SERVER_PORT
+      return 0
+    fi
+    if ! kill -0 "${REGISTRY_SERVER_PID}" >/dev/null 2>&1; then
+      cat "${tmp}/registry.log" >&2 || true
+      return 1
+    fi
+    sleep 0.05
+  done
+  cat "${tmp}/registry.log" >&2 || true
+  return 1
+}
+
+stop_registry_server() {
+  if [[ -n "${REGISTRY_SERVER_PID:-}" ]]; then
+    kill "${REGISTRY_SERVER_PID}" >/dev/null 2>&1 || true
+    wait "${REGISTRY_SERVER_PID}" 2>/dev/null || true
+    unset REGISTRY_SERVER_PID
+    unset REGISTRY_SERVER_PORT
+    export REGISTRY_SERVER_PID
+    export REGISTRY_SERVER_PORT
+  fi
+}
+
+write_registry_package_archive() {
+  local tmp="$1"
+  local registry_dir="$2"
+  local package_root
+  package_root="$(copy_swifterpm_fixture "RegistryFoo" "${tmp}")" || return 1
+
+  mkdir -p "${registry_dir}"
+  (
+    cd "${package_root}"
+    zip -qry "${registry_dir}/registryfoo.zip" .
+  )
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "${registry_dir}/registryfoo.zip" | awk '{print $1}' >"${registry_dir}/checksum.txt"
+  else
+    shasum -a 256 "${registry_dir}/registryfoo.zip" | awk '{print $1}' >"${registry_dir}/checksum.txt"
+  fi
 }
 
 resolve_package() {
@@ -751,6 +813,101 @@ scenario_resolves_swiftpm_local_case_insensitive_dependency() {
   echo "force-resolve=ok"
 }
 
+scenario_replace_scm_with_registry_uses_registry() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'stop_registry_server; rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local registry_dir="${tmp}/registry"
+  write_registry_package_archive "${tmp}" "${registry_dir}" || return 1
+  start_registry_server "${tmp}" "${registry_dir}" || return 1
+  local registry_url="http://127.0.0.1:${REGISTRY_SERVER_PORT}"
+
+  local package_dir
+  package_dir="$(copy_swifterpm_fixture "RegistryTransformApp" "${tmp}")" || return 1
+
+  scoped_env "${tmp}" "${SWIFTERPM_BIN}" \
+    --package-path "${package_dir}" \
+    --scratch-path "${package_dir}/.build" \
+    --cache-path "${tmp}/cache" \
+    --default-registry-url "${registry_url}" \
+    --replace-scm-with-registry \
+    --disable-package-info-cache \
+    --quiet \
+    resolve >/dev/null
+
+  local identity
+  identity="$(jq -r '.pins[0].identity' "${package_dir}/Package.resolved")"
+  local kind
+  kind="$(jq -r '.pins[0].kind' "${package_dir}/Package.resolved")"
+  test "${identity}" = "example.registryfoo" || return 1
+  test "${kind}" = "registry" || return 1
+  test -e "${package_dir}/.build/registry/downloads/example/registryfoo/1.0.0/Package.swift" || return 1
+  test ! -e "${package_dir}/.build/checkouts/RegistryFoo" || return 1
+
+  local archive
+  archive="$(find "${tmp}/cache/registry/archives" -type f -name '*.zip' -print | head -n 1)"
+  test -n "${archive}" || return 1
+  printf 'corrupt archive' >"${archive}"
+  rm -rf "${tmp}/cache/sources/example.registryfoo" "${package_dir}/.build/registry"
+
+  scoped_env "${tmp}" "${SWIFTERPM_BIN}" \
+    --package-path "${package_dir}" \
+    --scratch-path "${package_dir}/.build" \
+    --cache-path "${tmp}/cache" \
+    --default-registry-url "${registry_url}" \
+    --disable-package-info-cache \
+    --quiet \
+    restore >/dev/null
+
+  test -e "${package_dir}/.build/registry/downloads/example/registryfoo/1.0.0/Package.swift" || return 1
+
+  stop_registry_server
+  echo "identity=${identity}"
+  echo "kind=${kind}"
+  echo "registry-download=present"
+  echo "checkout=absent"
+  echo "corrupt-archive-redownload=ok"
+}
+
+scenario_resolves_transitive_local_file_system_dependencies() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local fixture_dir
+  fixture_dir="$(copy_swifterpm_fixture "TransitiveLocal" "${tmp}")" || return 1
+  local package_dir="${fixture_dir}/App"
+  compare_swiftpm_state_files "${tmp}" "${package_dir}" || return 1
+
+  local identities
+  identities="$(jq -r '.object.dependencies[].packageRef.identity' "${tmp}/swifterpm-scratch/workspace-state.json" | sort | tr '\n' ' ' | sed 's/ $//')"
+  test "${identities}" = "localone localtwo" || return 1
+
+  echo "workspace-state=match"
+  echo "local-identities=${identities}"
+}
+
+scenario_manifest_cache_stays_under_build_directory() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local package_dir
+  package_dir="$(copy_swifterpm_fixture "Bare" "${tmp}")" || return 1
+
+  resolve_package "${tmp}" "${package_dir}" "${tmp}/cache" || return 1
+
+  test ! -e "${package_dir}/.swifterpm-manifest.json" || return 1
+  test -e "${package_dir}/.build/swifterpm/manifests/package.json" || return 1
+
+  echo "legacy-cache=absent"
+  echo "manifest-cache=.build/swifterpm"
+}
+
 Describe "swifterpm resolve against real-world manifests"
   It "resolves Firefox iOS root Package.swift and emits a SwiftPM-acceptable lockfile"
     When call scenario_resolves_firefox_ios
@@ -819,5 +976,31 @@ Describe "swifterpm resolve against SwiftPM dependency graph fixtures"
     The output should include "package-resolved=both-absent"
     The output should include "workspace-state=match"
     The output should include "force-resolve=ok"
+  End
+
+  It "matches SwiftPM's transitive local file-system dependency scenario"
+    When call scenario_resolves_transitive_local_file_system_dependencies
+    The status should be success
+    The output should include "workspace-state=match"
+    The output should include "local-identities=localone localtwo"
+  End
+End
+
+Describe "swifterpm registry integration"
+  It "replaces source-control dependencies with registry downloads when requested"
+    When call scenario_replace_scm_with_registry_uses_registry
+    The status should be success
+    The output should include "identity=example.registryfoo"
+    The output should include "kind=registry"
+    The output should include "registry-download=present"
+    The output should include "checkout=absent"
+    The output should include "corrupt-archive-redownload=ok"
+  End
+
+  It "stores manifest dump caches under .build/swifterpm"
+    When call scenario_manifest_cache_stays_under_build_directory
+    The status should be success
+    The output should include "legacy-cache=absent"
+    The output should include "manifest-cache=.build/swifterpm"
   End
 End

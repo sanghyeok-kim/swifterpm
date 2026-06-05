@@ -36,7 +36,14 @@ enum Requirement: Sendable {
 }
 
 enum ManifestLoader {
-    static let cacheFile = ".swifterpm-manifest.json"
+    static let cacheDirectory = ".build/swifterpm/manifests"
+    static let cacheFile = "package.json"
+
+    static func cacheFilePath(packageDir: URL) -> URL {
+        packageDir
+            .appendingPathComponent(cacheDirectory)
+            .appendingPathComponent(cacheFile)
+    }
 
     static func dumpPackage(packageDir: URL, disableSandbox: Bool) async throws -> Any {
         let data = try await ManifestLoader.dumpPackageJSON(
@@ -58,14 +65,12 @@ enum ManifestLoader {
         let result = try await SystemProcess.run(
             "/usr/bin/swift", args, workingDirectory: packageDir
         )
-        try? await AsyncFileSystem.atomicWrite(
-            result.stdout, to: packageDir.appendingPathComponent(cacheFile)
-        )
+        try? await AsyncFileSystem.atomicWrite(result.stdout, to: cacheFilePath(packageDir: packageDir))
         return result.stdout
     }
 
     private static func readCachedManifest(packageDir: URL) async throws -> Data? {
-        let cache = packageDir.appendingPathComponent(cacheFile)
+        let cache = cacheFilePath(packageDir: packageDir)
         let manifest = packageDir.appendingPathComponent("Package.swift")
         guard try await AsyncFileSystem.exists(cache) else { return nil }
         guard let cacheDate = try await AsyncFileSystem.modificationDate(cache),
@@ -75,6 +80,67 @@ enum ManifestLoader {
             return nil
         }
         return try await AsyncFileSystem.readData(from: cache)
+    }
+}
+
+struct ManifestFileSystemPackage: @unchecked Sendable {
+    let dependency: ManifestFileSystemDependency
+    let packagePath: URL
+    let manifest: Any
+}
+
+enum ManifestFileSystemDependencyGraph {
+    static func collect(
+        rootPackageDir: URL,
+        rootManifest: Any,
+        disableSandbox: Bool
+    ) async throws -> [ManifestFileSystemPackage] {
+        var result: [ManifestFileSystemPackage] = []
+        var seenPackagePaths = Set<String>()
+        var queue = try ManifestParser.fileSystemDependencies(rootManifest).map {
+            (parentPackageDir: rootPackageDir, dependency: $0)
+        }
+
+        while !queue.isEmpty {
+            let item = queue.removeFirst()
+            let packagePath = packagePathForFileSystemDependency(
+                parentPackageDir: item.parentPackageDir,
+                dependency: item.dependency
+            )
+            let canonicalPath = PathCanonicalizer.realpath(packagePath)
+            guard seenPackagePaths.insert(canonicalPath.path).inserted else {
+                continue
+            }
+
+            let manifest = try await ManifestLoader.dumpPackage(
+                packageDir: canonicalPath,
+                disableSandbox: disableSandbox
+            )
+            result.append(
+                ManifestFileSystemPackage(
+                    dependency: item.dependency,
+                    packagePath: canonicalPath,
+                    manifest: manifest
+                )
+            )
+            for child in try ManifestParser.fileSystemDependencies(manifest) {
+                queue.append((parentPackageDir: canonicalPath, dependency: child))
+            }
+        }
+
+        return result
+    }
+
+    static func packagePathForFileSystemDependency(
+        parentPackageDir: URL,
+        dependency: ManifestFileSystemDependency
+    ) -> URL {
+        if dependency.path.hasPrefix("/") {
+            return URL(fileURLWithPath: dependency.path).standardizedFileURL
+        }
+        return parentPackageDir
+            .appendingPathComponent(dependency.path)
+            .standardizedFileURL
     }
 }
 
