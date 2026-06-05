@@ -18,15 +18,15 @@ TOOL_CONFIG_DEFAULTS = {
 _TOOL_CONFIG_ATTRS = {
     "build_path": attr.string(
         default = TOOL_CONFIG_DEFAULTS["build_path"],
-        doc = "Path passed to SwifterPM as --build-path.",
+        doc = "Package-relative or absolute path passed to SwifterPM as --build-path.",
     ),
     "cache_path": attr.string(
         default = TOOL_CONFIG_DEFAULTS["cache_path"],
-        doc = "Path passed to SwifterPM as --cache-path.",
+        doc = "Package-relative or absolute path passed to SwifterPM as --cache-path.",
     ),
     "config_path": attr.string(
         default = TOOL_CONFIG_DEFAULTS["config_path"],
-        doc = "Path passed to SwifterPM as --config-path.",
+        doc = "Package-relative or absolute path passed to SwifterPM as --config-path.",
     ),
     "dependency_caching": attr.bool(
         default = TOOL_CONFIG_DEFAULTS["dependency_caching"],
@@ -47,7 +47,7 @@ _TOOL_CONFIG_ATTRS = {
     ),
     "security_path": attr.string(
         default = TOOL_CONFIG_DEFAULTS["security_path"],
-        doc = "Path passed to SwifterPM as --security-path.",
+        doc = "Package-relative or absolute path passed to SwifterPM as --security-path.",
     ),
     "use_registry_identity_for_scm": attr.bool(
         default = TOOL_CONFIG_DEFAULTS["use_registry_identity_for_scm"],
@@ -125,16 +125,16 @@ def _link_local_swifterpm(repository_ctx, binary_name):
 def _common_swifterpm_arg_lines(repository_ctx):
     attr = repository_ctx.attr
     lines = [
-        "args+=(--package-path {})".format(_shell_quote(attr.package_path)),
-        "args+=(--build-path {})".format(_shell_quote(attr.build_path)),
-        "args+=(--cache-path {})".format(_shell_quote(attr.cache_path)),
-        "args+=(--security-path {})".format(_shell_quote(attr.security_path)),
+        "args+=(--package-path \"${package_path}\")",
+        "args+=(--build-path \"$(package_relative_path {})\")".format(_shell_quote(attr.build_path)),
+        "args+=(--cache-path \"$(package_relative_path {})\")".format(_shell_quote(attr.cache_path)),
+        "args+=(--security-path \"$(package_relative_path {})\")".format(_shell_quote(attr.security_path)),
     ]
 
     if attr.registries:
         lines.append("args+=(--config-path \"${runfiles_repo_dir}/registries.json\")")
     else:
-        lines.append("args+=(--config-path {})".format(_shell_quote(attr.config_path)))
+        lines.append("args+=(--config-path \"$(package_relative_path {})\")".format(_shell_quote(attr.config_path)))
 
     if attr.dependency_caching:
         lines.append("args+=(--enable-dependency-cache)")
@@ -178,6 +178,13 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${{BASH_SOURCE[0]}}")" && pwd)"
 wrapper_path="$0"
 wrapper_dir="$(cd "$(dirname "${{wrapper_path}}")" && pwd)"
+package_path={package_path}
+package_relative_path() {{
+  case "$1" in
+    /*) printf '%s\n' "$1" ;;
+    *) printf '%s\n' "${{package_path}}/$1" ;;
+  esac
+}}
 repo_name="$(basename "${{wrapper_dir}}")"
 if [[ -n "${{RUNFILES_DIR:-}}" && -d "${{RUNFILES_DIR}}/${{repo_name}}" ]]; then
   runfiles_repo_dir="${{RUNFILES_DIR}}/${{repo_name}}"
@@ -196,6 +203,7 @@ exec "${{runfiles_repo_dir}}/{binary_name}" "${{args[@]}}" "$@"
         binary_name = binary_name,
         command_arg_lines = "\n".join(command_arg_lines),
         env_exports = "\n".join(env_exports),
+        package_path = _shell_quote(repository_ctx.attr.package_path),
     )
 
 def _swifterpm_tool_repo_impl(repository_ctx):

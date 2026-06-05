@@ -369,6 +369,198 @@ resolved_identities() {
   jq -r '.pins[].identity' "${package_dir}/Package.resolved" | sort | tr '\n' ' ' | sed 's/ $//'
 }
 
+not_darwin() {
+  [[ "$(uname -s)" != "Darwin" ]]
+}
+
+bazel_in_workspace() {
+  local tmp="$1"
+  local workspace="$2"
+  shift 2
+
+  (
+    cd "${workspace}" &&
+      scoped_env "${tmp}" bazel \
+        --output_user_root="${tmp}/bazel-output" \
+        --max_idle_secs=5 \
+        --noworkspace_rc \
+        --nohome_rc \
+        --nosystem_rc \
+        "$@"
+  )
+}
+
+write_bazel_apple_rules_fixture() {
+  local workspace="$1"
+  local dependency="$2"
+  local swifterpm_bin="$3"
+  local repo_root="$4"
+
+  mkdir -p \
+    "${dependency}/Sources/E2EDependency" \
+    "${workspace}/Sources/Runner"
+
+  cat >"${dependency}/Package.swift" <<'EOF'
+// swift-tools-version:6.0
+import PackageDescription
+
+let package = Package(
+    name: "Dependency",
+    products: [
+        .library(name: "E2EDependency", targets: ["E2EDependency"]),
+    ],
+    targets: [
+        .target(name: "E2EDependency"),
+    ]
+)
+EOF
+
+  cat >"${dependency}/Sources/E2EDependency/E2EDependency.swift" <<'EOF'
+public enum E2EDependency {
+    public static func message() -> String {
+        "linked-from-restored-checkout"
+    }
+}
+EOF
+
+  cat >"${workspace}/Package.swift" <<'EOF'
+// swift-tools-version:6.0
+import PackageDescription
+
+let package = Package(
+    name: "AppleRulesIntegrationApp",
+    platforms: [
+        .macOS(.v15),
+    ],
+    dependencies: [
+        .package(url: "../Dependency", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-log.git", exact: "1.12.1"),
+    ],
+    targets: [
+        .executableTarget(
+            name: "Runner",
+            dependencies: [
+                .product(name: "E2EDependency", package: "Dependency"),
+                .product(name: "Logging", package: "swift-log"),
+            ]
+        ),
+    ]
+)
+EOF
+
+  cat >"${workspace}/MODULE.bazel" <<EOF
+module(
+    name = "swifterpm_apple_rules_e2e",
+    version = "0.0.0",
+)
+
+bazel_dep(name = "apple_support", version = "2.5.4")
+bazel_dep(name = "rules_apple", version = "4.3.3")
+bazel_dep(
+    name = "rules_swift",
+    version = "3.6.1",
+    repo_name = "build_bazel_rules_swift",
+)
+bazel_dep(name = "swifterpm", version = "0.3.0")
+
+local_path_override(
+    module_name = "swifterpm",
+    path = "${repo_root}",
+)
+
+apple_cc_configure = use_extension(
+    "@apple_support//crosstool:setup.bzl",
+    "apple_cc_configure_extension",
+)
+use_repo(apple_cc_configure, "local_config_apple_cc")
+
+swift_deps = use_extension("@swifterpm//:extensions.bzl", "swift_deps")
+swift_deps.configure_swifterpm(
+    local_binary = "${swifterpm_bin}",
+)
+swift_deps.from_package(
+    swift = "//:Package.swift",
+)
+use_repo(swift_deps, "swift_package")
+EOF
+
+  cat >"${workspace}/BUILD.bazel" <<'EOF'
+load("@build_bazel_rules_swift//swift:swift.bzl", "swift_library")
+load("@rules_apple//apple:macos.bzl", "macos_command_line_application")
+load("@rules_apple//apple:versioning.bzl", "apple_bundle_version")
+
+swift_library(
+    name = "E2EDependency",
+    srcs = [".build/checkouts/Dependency/Sources/E2EDependency/E2EDependency.swift"],
+    module_name = "E2EDependency",
+)
+
+swift_library(
+    name = "Logging",
+    srcs = glob([".build/checkouts/swift-log/Sources/Logging/**/*.swift"]),
+    module_name = "Logging",
+    package_name = "swift_log",
+)
+
+swift_library(
+    name = "RunnerSources",
+    srcs = ["Sources/Runner/main.swift"],
+    deps = [
+        ":E2EDependency",
+        ":Logging",
+    ],
+)
+
+apple_bundle_version(
+    name = "RunnerVersion",
+    build_version = "1",
+    short_version_string = "1.0",
+)
+
+macos_command_line_application(
+    name = "Runner",
+    bundle_id = "dev.tuist.swifterpm.e2e.runner",
+    infoplists = [":Info.plist"],
+    minimum_os_version = "15.0",
+    version = ":RunnerVersion",
+    deps = [":RunnerSources"],
+)
+EOF
+
+  cat >"${workspace}/Sources/Runner/main.swift" <<'EOF'
+import E2EDependency
+import Logging
+
+let remoteMessage: Logger.Message = "remote-dependency-linked"
+print("\(E2EDependency.message()):\(remoteMessage.description):\(Logger.Level.info.rawValue)")
+EOF
+
+  cat >"${workspace}/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleDevelopmentRegion</key>
+  <string>en</string>
+  <key>CFBundleExecutable</key>
+  <string>Runner</string>
+  <key>CFBundleIdentifier</key>
+  <string>dev.tuist.swifterpm.e2e.runner</string>
+  <key>CFBundleInfoDictionaryVersion</key>
+  <string>6.0</string>
+  <key>CFBundleName</key>
+  <string>Runner</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.0</string>
+  <key>CFBundleVersion</key>
+  <string>1</string>
+</dict>
+</plist>
+EOF
+}
+
 scenario_resolves_firefox_ios() {
   local tmp
   tmp="$(mktemp -d)"
@@ -407,6 +599,69 @@ scenario_resolves_pocket_casts_ios() {
 
   echo "pins=$(pin_count "${package_dir}")"
   echo "force-resolve=ok"
+}
+
+scenario_bazel_apple_rules_restores_dependency_and_links() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'bazel --output_user_root="${tmp}/bazel-output" shutdown >/dev/null 2>&1 || true; rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local workspace="${tmp}/workspace"
+  local dependency="${tmp}/Dependency"
+  local swifterpm_bin
+  swifterpm_bin="$(cd "$(dirname "${SWIFTERPM_BIN}")" && pwd -P)/$(basename "${SWIFTERPM_BIN}")"
+  local repo_root
+  repo_root="$(pwd -P)"
+
+  write_bazel_apple_rules_fixture \
+    "${workspace}" \
+    "${dependency}" \
+    "${swifterpm_bin}" \
+    "${repo_root}" || return 1
+  init_git_package "${tmp}" "${dependency}" || return 1
+  tag_git_package "${tmp}" "${dependency}" "1.0.0" || return 1
+
+  bazel_in_workspace "${tmp}" "${workspace}" run @swift_package//:resolve \
+    >"${tmp}/resolve.stdout" 2>"${tmp}/resolve.stderr" || {
+      cat "${tmp}/resolve.stderr" >&2
+      cat "${tmp}/resolve.stdout" >&2
+      return 1
+    }
+  bazel_in_workspace "${tmp}" "${workspace}" run @swift_package//:restore \
+    >"${tmp}/restore.stdout" 2>"${tmp}/restore.stderr" || {
+      cat "${tmp}/restore.stderr" >&2
+      cat "${tmp}/restore.stdout" >&2
+      return 1
+    }
+
+  local checkout_source="${workspace}/.build/checkouts/Dependency/Sources/E2EDependency/E2EDependency.swift"
+  if [[ ! -f "${checkout_source}" ]]; then
+    find "${workspace}/.build" -maxdepth 4 -print >&2 || true
+    return 1
+  fi
+  local remote_checkout_source="${workspace}/.build/checkouts/swift-log/Sources/Logging/Logger.swift"
+  if [[ ! -f "${remote_checkout_source}" ]]; then
+    find "${workspace}/.build" -maxdepth 5 -print >&2 || true
+    return 1
+  fi
+
+  bazel_in_workspace "${tmp}" "${workspace}" run //:Runner \
+    >"${tmp}/app.stdout" 2>"${tmp}/app.stderr" || {
+      cat "${tmp}/app.stderr" >&2
+      cat "${tmp}/app.stdout" >&2
+      return 1
+    }
+  grep -q "linked-from-restored-checkout:remote-dependency-linked:info" "${tmp}/app.stdout" || {
+    cat "${tmp}/app.stderr" >&2
+    cat "${tmp}/app.stdout" >&2
+    return 1
+  }
+
+  echo "checkout=present"
+  echo "remote-checkout=present"
+  echo "apple-rules-link=ok"
+  echo "app-output=$(grep -m 1 "linked-from-restored-checkout:remote-dependency-linked:info" "${tmp}/app.stdout")"
 }
 
 scenario_resolves_swiftpm_external_simple() {
@@ -509,6 +764,19 @@ Describe "swifterpm resolve against real-world manifests"
     The status should be success
     The output should match pattern "pins=*"
     The output should include "force-resolve=ok"
+  End
+End
+
+Describe "swifterpm Bazel Apple rules integration"
+  Skip if "requires macOS rules_apple toolchain" not_darwin
+
+  It "restores a dependency into .build/checkouts and links it with rules_apple"
+    When call scenario_bazel_apple_rules_restores_dependency_and_links
+    The status should be success
+    The output should include "checkout=present"
+    The output should include "remote-checkout=present"
+    The output should include "apple-rules-link=ok"
+    The output should include "app-output=linked-from-restored-checkout:remote-dependency-linked:info"
   End
 End
 
