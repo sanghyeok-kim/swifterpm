@@ -121,8 +121,19 @@ enum HTTPClient {
     }
 
     static func download(url: URL, destination: URL, headers: [String: String] = [:]) async throws {
-        let data = try await data(url: url, headers: headers)
-        try await AsyncFileSystem.atomicWrite(data, to: destination)
+        var request = URLRequest(url: url)
+        for (key, value) in headers {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        let (downloaded, response) = try await URLSession.shared.download(for: request)
+        if let httpResponse = response as? HTTPURLResponse,
+            !(200..<300).contains(httpResponse.statusCode)
+        {
+            try? await AsyncFileSystem.removeItem(at: downloaded)
+            throw ToolError.message("HTTP \(httpResponse.statusCode) for \(url.absoluteString)")
+        }
+
+        try await AsyncFileSystem.replaceFile(downloaded, at: destination)
     }
 }
 
@@ -134,6 +145,17 @@ enum Hashing {
     static func sha256Hex(_ data: Data) -> String {
         let digest = SHA256.hash(data: data)
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func sha256Hex(fileAt url: URL) throws -> String {
+        let handle = try FileHandle(forReadingFrom: url)
+        defer { try? handle.close() }
+
+        var hasher = SHA256()
+        while let data = try handle.read(upToCount: 1024 * 1024), !data.isEmpty {
+            hasher.update(data: data)
+        }
+        return hasher.finalize().map { String(format: "%02x", $0) }.joined()
     }
 
     static func shortRevision(_ revision: String) -> String {
@@ -294,6 +316,25 @@ enum SafeFileName {
                 }
                 return "_"
             })
+    }
+}
+
+enum PathCanonicalizer {
+    static func realpath(_ url: URL) -> URL {
+        #if os(Windows)
+            url.standardizedFileURL
+        #else
+            var buffer = [CChar](repeating: 0, count: Int(PATH_MAX))
+            #if os(Linux)
+                let resolved = Glibc.realpath(url.path, &buffer)
+            #else
+                let resolved = Darwin.realpath(url.path, &buffer)
+            #endif
+            if resolved != nil {
+                return URL(fileURLWithPath: String(cString: buffer))
+            }
+            return url.standardizedFileURL
+        #endif
     }
 }
 

@@ -59,6 +59,19 @@ enum AsyncFileSystem {
         }
     }
 
+    static func replaceFile(_ source: URL, at destination: URL) async throws {
+        try await createDirectory(at: destination.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            try await fileSystem.replaceItem(
+                at: filePath(destination),
+                withItemAt: filePath(source)
+            )
+        } catch {
+            try? await removeItem(at: source)
+            throw error
+        }
+    }
+
     static func removeItem(at url: URL) async throws {
         _ = try await fileSystem.removeItem(at: filePath(url))
     }

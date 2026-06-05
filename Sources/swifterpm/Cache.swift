@@ -74,12 +74,11 @@ struct Cache: Sendable {
                 "artifact-\(Hashing.stable(url))-\(String(checksum.prefix(12))).zip")
     }
 
-    func binaryArtifactPath(identity: String, targetName: String, checksum: String) -> URL {
+    func binaryArtifactDirectory(identity: String, targetName: String, checksum: String) -> URL {
         root
             .appendingPathComponent("artifacts")
             .appendingPathComponent(identity)
             .appendingPathComponent("\(targetName)-\(String(checksum.prefix(12)))")
-            .appendingPathComponent("\(targetName).xcframework")
     }
 
     func remoteVersionsPath(location: String) -> URL {

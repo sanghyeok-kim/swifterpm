@@ -53,12 +53,15 @@ enum ResolvedFile {
     }
 
     static func write(packageDir: URL, resolved: ResolvedPins) async throws {
+        let path = packageDir.appendingPathComponent("Package.resolved")
+        if resolved.pins.isEmpty {
+            try await AsyncFileSystem.removePath(path)
+            return
+        }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         let data = try encoder.encode(resolved) + Data("\n".utf8)
-        try await AsyncFileSystem.atomicWrite(
-            data, to: packageDir.appendingPathComponent("Package.resolved")
-        )
+        try await AsyncFileSystem.atomicWrite(data, to: path)
     }
 
     static func print(_ resolved: ResolvedPins) {

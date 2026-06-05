@@ -38,7 +38,31 @@ struct CLIRunnerTests {
                     command: .update(.init(packageDir: root))
                 ))
 
-            #expect(try await ResolvedFile.read(packageDir: root).pins.isEmpty)
+            #expect(
+                try await !AsyncFileSystem.exists(root.appendingPathComponent("Package.resolved"))
+            )
+        }
+    }
+
+    @Test
+    func chdirResolvesRelativePathsWithoutChangingProcessDirectory() async throws {
+        try await withTemporaryDirectory { root in
+            let package = root.appendingPathComponent("Package")
+            try await writeMinimalPackageManifest(at: package, name: "Fixture")
+
+            let currentDirectory = try await AsyncFileSystem.currentDirectoryPath()
+
+            try await CLIRunner.run(
+                CLI(
+                    chdir: root,
+                    cachePath: URL(fileURLWithPath: "cache"),
+                    disableSandbox: true,
+                    quiet: true,
+                    command: .resolve(.init(packageDir: URL(fileURLWithPath: "Package")))
+                ))
+
+            #expect(try await AsyncFileSystem.currentDirectoryPath() == currentDirectory)
+            #expect(try await AsyncFileSystem.exists(root.appendingPathComponent("cache/sources")))
         }
     }
 

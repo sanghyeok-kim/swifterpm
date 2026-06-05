@@ -19,9 +19,13 @@ struct ManifestFileSystemDependency: Sendable {
 }
 
 struct ManifestBinaryTarget: Sendable {
+    enum Source: Sendable {
+        case local(path: String)
+        case remote(url: String, checksum: String)
+    }
+
     let name: String
-    let url: String
-    let checksum: String
+    let source: Source
 }
 
 enum Requirement: Sendable {
@@ -75,6 +79,10 @@ enum ManifestLoader {
 }
 
 enum ManifestParser {
+    static func packageName(_ manifest: Any) -> String? {
+        (manifest as? [String: Any])?["name"] as? String
+    }
+
     static func dependencies(_ manifest: Any) throws -> [ManifestDependency] {
         var dependencies: [ManifestDependency] = []
         guard let root = manifest as? [String: Any],
@@ -275,11 +283,18 @@ enum ManifestParser {
             guard let name = target["name"] as? String else {
                 throw ToolError.message("binary target is missing name")
             }
-            guard let url = target["url"] as? String else { continue }
-            guard let checksum = target["checksum"] as? String else {
-                throw ToolError.message("\(name) is missing checksum")
+            if let url = target["url"] as? String {
+                guard let checksum = target["checksum"] as? String else {
+                    throw ToolError.message("\(name) is missing checksum")
+                }
+                result.append(
+                    ManifestBinaryTarget(name: name, source: .remote(url: url, checksum: checksum))
+                )
+            } else if let path = target["path"] as? String {
+                result.append(ManifestBinaryTarget(name: name, source: .local(path: path)))
+            } else {
+                throw ToolError.message("\(name) is missing binary artifact path or URL")
             }
-            result.append(ManifestBinaryTarget(name: name, url: url, checksum: checksum))
         }
         return result
     }
