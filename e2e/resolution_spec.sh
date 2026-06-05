@@ -434,12 +434,14 @@ let package = Package(
     ],
     dependencies: [
         .package(url: "../Dependency", from: "1.0.0"),
+        .package(url: "https://github.com/apple/swift-log.git", exact: "1.12.1"),
     ],
     targets: [
         .executableTarget(
             name: "Runner",
             dependencies: [
                 .product(name: "E2EDependency", package: "Dependency"),
+                .product(name: "Logging", package: "swift-log"),
             ]
         ),
     ]
@@ -494,9 +496,19 @@ swift_library(
 )
 
 swift_library(
+    name = "Logging",
+    srcs = glob([".build/checkouts/swift-log/Sources/Logging/**/*.swift"]),
+    module_name = "Logging",
+    package_name = "swift_log",
+)
+
+swift_library(
     name = "RunnerSources",
     srcs = ["Sources/Runner/main.swift"],
-    deps = [":E2EDependency"],
+    deps = [
+        ":E2EDependency",
+        ":Logging",
+    ],
 )
 
 apple_bundle_version(
@@ -517,8 +529,10 @@ EOF
 
   cat >"${workspace}/Sources/Runner/main.swift" <<'EOF'
 import E2EDependency
+import Logging
 
-print(E2EDependency.message())
+let remoteMessage: Logger.Message = "remote-dependency-linked"
+print("\(E2EDependency.message()):\(remoteMessage.description):\(Logger.Level.info.rawValue)")
 EOF
 
   cat >"${workspace}/Info.plist" <<'EOF'
@@ -626,6 +640,11 @@ scenario_bazel_apple_rules_restores_dependency_and_links() {
     find "${workspace}/.build" -maxdepth 4 -print >&2 || true
     return 1
   fi
+  local remote_checkout_source="${workspace}/.build/checkouts/swift-log/Sources/Logging/Logger.swift"
+  if [[ ! -f "${remote_checkout_source}" ]]; then
+    find "${workspace}/.build" -maxdepth 5 -print >&2 || true
+    return 1
+  fi
 
   bazel_in_workspace "${tmp}" "${workspace}" run //:Runner \
     >"${tmp}/app.stdout" 2>"${tmp}/app.stderr" || {
@@ -633,15 +652,16 @@ scenario_bazel_apple_rules_restores_dependency_and_links() {
       cat "${tmp}/app.stdout" >&2
       return 1
     }
-  grep -q "linked-from-restored-checkout" "${tmp}/app.stdout" || {
+  grep -q "linked-from-restored-checkout:remote-dependency-linked:info" "${tmp}/app.stdout" || {
     cat "${tmp}/app.stderr" >&2
     cat "${tmp}/app.stdout" >&2
     return 1
   }
 
   echo "checkout=present"
+  echo "remote-checkout=present"
   echo "apple-rules-link=ok"
-  echo "app-output=$(grep -m 1 "linked-from-restored-checkout" "${tmp}/app.stdout")"
+  echo "app-output=$(grep -m 1 "linked-from-restored-checkout:remote-dependency-linked:info" "${tmp}/app.stdout")"
 }
 
 scenario_resolves_swiftpm_external_simple() {
@@ -754,8 +774,9 @@ Describe "swifterpm Bazel Apple rules integration"
     When call scenario_bazel_apple_rules_restores_dependency_and_links
     The status should be success
     The output should include "checkout=present"
+    The output should include "remote-checkout=present"
     The output should include "apple-rules-link=ok"
-    The output should include "app-output=linked-from-restored-checkout"
+    The output should include "app-output=linked-from-restored-checkout:remote-dependency-linked:info"
   End
 End
 
