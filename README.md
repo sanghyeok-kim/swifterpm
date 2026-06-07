@@ -60,7 +60,7 @@ Useful SwiftPM-shaped flags are supported, including `--package-path`, `--cache-
 `swifterpm` also ships a Bzlmod extension with the same resolver helper shape as `rules_swift_package_manager`:
 
 ```starlark
-bazel_dep(name = "swifterpm", version = "0.3.0")
+bazel_dep(name = "swifterpm", version = "0.6.1")
 
 swift_deps = use_extension("@swifterpm//:extensions.bzl", "swift_deps")
 swift_deps.from_package(
