@@ -663,14 +663,16 @@ scenario_resolves_pocket_casts_ios() {
   echo "force-resolve=ok"
 }
 
-scenario_resolves_external_dependencies_large_fixture() {
+scenario_resolves_locked_swifterpm_fixture() {
+  local fixture="$1"
+  local expected_pins="$2"
   local tmp
   tmp="$(mktemp -d)"
   trap 'rm -rf "${tmp}"' RETURN
   prepare_isolated_state "${tmp}"
 
   local package_dir
-  package_dir="$(copy_swifterpm_fixture "ExternalDependenciesLarge" "${tmp}")" || return 1
+  package_dir="$(copy_swifterpm_fixture "${fixture}" "${tmp}")" || return 1
 
   local expected_resolved="${tmp}/Package.expected.resolved"
   cp "${package_dir}/Package.resolved" "${expected_resolved}"
@@ -690,6 +692,7 @@ scenario_resolves_external_dependencies_large_fixture() {
     "${package_dir}/Package.resolved" || return 1
 
   echo "pins=$(pin_count "${package_dir}")"
+  test "$(pin_count "${package_dir}")" = "${expected_pins}" || return 1
   echo "package-resolved=match"
   echo "skip-update-resolve=ok"
 }
@@ -955,9 +958,17 @@ Describe "swifterpm resolve against real-world manifests"
   End
 
   It "resolves the large external dependencies fixture and preserves its lockfile"
-    When call scenario_resolves_external_dependencies_large_fixture
+    When call scenario_resolves_locked_swifterpm_fixture "ExternalDependenciesLarge" "69"
     The status should be success
     The output should include "pins=69"
+    The output should include "package-resolved=match"
+    The output should include "skip-update-resolve=ok"
+  End
+
+  It "resolves the larger external dependencies fixture and preserves its lockfile"
+    When call scenario_resolves_locked_swifterpm_fixture "ExternalDependenciesLarger" "102"
+    The status should be success
+    The output should include "pins=102"
     The output should include "package-resolved=match"
     The output should include "skip-update-resolve=ok"
   End
