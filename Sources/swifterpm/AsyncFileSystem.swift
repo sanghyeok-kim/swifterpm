@@ -5,10 +5,17 @@ enum AsyncFileSystem {
     private static let fileSystem = FileSystem.shared
 
     static func createDirectory(at url: URL, withIntermediateDirectories: Bool) async throws {
-        try await fileSystem.createDirectory(
-            at: filePath(url),
-            withIntermediateDirectories: withIntermediateDirectories
-        )
+        do {
+            try await fileSystem.createDirectory(
+                at: filePath(url),
+                withIntermediateDirectories: withIntermediateDirectories
+            )
+        } catch {
+            if try await isDirectory(url) {
+                return
+            }
+            throw error
+        }
     }
 
     static func exists(_ url: URL) async throws -> Bool {

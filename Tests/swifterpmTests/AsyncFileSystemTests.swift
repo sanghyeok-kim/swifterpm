@@ -43,4 +43,25 @@ struct AsyncFileSystemTests {
             #expect(!(try await AsyncFileSystem.currentDirectoryPath()).isEmpty)
         }
     }
+
+    @Test
+    func concurrentIntermediateDirectoryCreationIsIdempotent() async throws {
+        try await withTemporaryDirectory { root in
+            let directory = root.appendingPathComponent("artifacts/grpc-binary")
+
+            try await withThrowingTaskGroup(of: Void.self) { group in
+                for _ in 0..<32 {
+                    group.addTask {
+                        try await AsyncFileSystem.createDirectory(
+                            at: directory,
+                            withIntermediateDirectories: true
+                        )
+                    }
+                }
+                try await group.waitForAll()
+            }
+
+            #expect(try await AsyncFileSystem.isDirectory(directory))
+        }
+    }
 }
