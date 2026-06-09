@@ -1128,6 +1128,123 @@ scenario_replace_scm_with_registry_uses_registry() {
   echo "corrupt-archive-redownload=ok"
 }
 
+scenario_replace_scm_with_registry_falls_back_to_scm_when_registry_has_no_versions() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'stop_registry_server; rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local registry_dir="${tmp}/registry"
+  mkdir -p "${registry_dir}"
+  touch "${registry_dir}/no-releases"
+  start_registry_server "${tmp}" "${registry_dir}" || return 1
+  local registry_url="http://127.0.0.1:${REGISTRY_SERVER_PORT}"
+
+  local fixture_dir
+  fixture_dir="$(copy_swifterpm_fixture "RegistryFallbackToSCM" "${tmp}")" || return 1
+
+  local dependency_dir="${fixture_dir}/LocalRegistryFoo"
+  init_git_package "${tmp}" "${dependency_dir}" || return 1
+  tag_git_package "${tmp}" "${dependency_dir}" "1.0.0" || return 1
+  dependency_dir="$(canonical_path "${dependency_dir}")"
+
+  local package_dir="${fixture_dir}/App"
+
+  scoped_env "${tmp}" "${SWIFTERPM_BIN}" \
+    --package-path "${package_dir}" \
+    --scratch-path "${package_dir}/.build" \
+    --cache-path "${tmp}/cache" \
+    --default-registry-url "${registry_url}" \
+    --replace-scm-with-registry \
+    --disable-package-info-cache \
+    --quiet \
+    resolve >/dev/null
+
+  local identity
+  identity="$(jq -r '.pins[0].identity' "${package_dir}/Package.resolved")"
+  local kind
+  kind="$(jq -r '.pins[0].kind' "${package_dir}/Package.resolved")"
+  local location
+  location="$(jq -r '.pins[0].location' "${package_dir}/Package.resolved")"
+  local version
+  version="$(jq -r '.pins[0].state.version' "${package_dir}/Package.resolved")"
+
+  test "${identity}" = "example.registryfoo" || return 1
+  test "${kind}" = "localSourceControl" || return 1
+  test "${location}" = "${dependency_dir}" || return 1
+  test "${version}" = "1.0.0" || return 1
+  test -e "${package_dir}/.build/checkouts/LocalRegistryFoo/Package.swift" || return 1
+  test ! -e "${package_dir}/.build/registry/downloads/example/registryfoo/1.0.0/Package.swift" || return 1
+
+  stop_registry_server
+  echo "identity=${identity}"
+  echo "kind=${kind}"
+  echo "version=${version}"
+  echo "checkout=present"
+  echo "registry-download=absent"
+}
+
+scenario_replace_scm_with_registry_skips_directly_incompatible_candidate() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'stop_registry_server; rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local registry_dir="${tmp}/registry"
+  mkdir -p "${registry_dir}"
+  start_registry_server "${tmp}" "${registry_dir}" || return 1
+  local registry_url="http://127.0.0.1:${REGISTRY_SERVER_PORT}"
+
+  local fixture_dir
+  fixture_dir="$(copy_swifterpm_fixture "GreedyLookahead" "${tmp}")" || return 1
+
+  local proto_dir="${fixture_dir}/Proto"
+  init_git_package "${tmp}" "${proto_dir}" || return 1
+  tag_git_package "${tmp}" "${proto_dir}" "1.35.1" "1.38.0" || return 1
+  scoped_env "${tmp}" git clone --bare "${proto_dir}" "${fixture_dir}/Proto.git" >/dev/null 2>&1 || return 1
+
+  local service_dir="${fixture_dir}/Service"
+  init_git_package "${tmp}" "${service_dir}" || return 1
+  tag_git_package "${tmp}" "${service_dir}" "2.3.0" || return 1
+  cp "${fixture_dir}/ServiceIncompatible/Package.swift" "${service_dir}/Package.swift"
+  scoped_env "${tmp}" git -C "${service_dir}" add Package.swift
+  scoped_env "${tmp}" git -C "${service_dir}" commit -m "Raise proto lower bound" >/dev/null
+  tag_git_package "${tmp}" "${service_dir}" "2.4.0" || return 1
+  scoped_env "${tmp}" git clone --bare "${service_dir}" "${fixture_dir}/Service.git" >/dev/null 2>&1 || return 1
+
+  local package_dir="${fixture_dir}/App"
+  scoped_env "${tmp}" swift package --package-path "${package_dir}" resolve >/dev/null 2>&1 || return 1
+  local swiftpm_service_version
+  swiftpm_service_version="$(pin_state_value "${package_dir}" "service" "version")"
+  test "${swiftpm_service_version}" = "2.3.0" || return 1
+
+  rm -rf "${package_dir}/.build" "${package_dir}/Package.resolved"
+
+  scoped_env "${tmp}" "${SWIFTERPM_BIN}" \
+    --package-path "${package_dir}" \
+    --scratch-path "${package_dir}/.build" \
+    --cache-path "${tmp}/cache" \
+    --default-registry-url "${registry_url}" \
+    --replace-scm-with-registry \
+    --disable-package-info-cache \
+    --quiet \
+    resolve >/dev/null
+
+  local swifterpm_service_version
+  swifterpm_service_version="$(
+    pin_state_value "${package_dir}" "grpc.grpc-swift-protobuf" "version"
+  )"
+  local proto_version
+  proto_version="$(pin_state_value "${package_dir}" "apple.swift-protobuf" "version")"
+  test "${swifterpm_service_version}" = "${swiftpm_service_version}" || return 1
+  test "${proto_version}" = "1.35.1" || return 1
+
+  stop_registry_server
+  echo "swiftpm-service-version=${swiftpm_service_version}"
+  echo "swifterpm-service-version=${swifterpm_service_version}"
+  echo "proto-version=${proto_version}"
+}
+
 scenario_resolves_transitive_local_file_system_dependencies() {
   local tmp
   tmp="$(mktemp -d)"
@@ -1145,6 +1262,63 @@ scenario_resolves_transitive_local_file_system_dependencies() {
 
   echo "workspace-state=match"
   echo "local-identities=${identities}"
+}
+
+scenario_resolves_pubgrub_shared_dependency_intersection() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local fixture_dir
+  fixture_dir="$(copy_swifterpm_fixture "PubGrubSharedDependency" "${tmp}")" || return 1
+
+  init_git_package "${tmp}" "${fixture_dir}/A" || return 1
+  tag_git_package "${tmp}" "${fixture_dir}/A" "1.0.0" || return 1
+  init_git_package "${tmp}" "${fixture_dir}/B" || return 1
+  tag_git_package "${tmp}" "${fixture_dir}/B" "1.0.0" || return 1
+  init_git_package "${tmp}" "${fixture_dir}/Shared" || return 1
+  tag_git_package "${tmp}" "${fixture_dir}/Shared" \
+    "2.0.0" "3.0.0" "3.6.9" "4.0.0" "5.0.0" || return 1
+
+  local package_dir="${fixture_dir}/App"
+  compare_swiftpm_state_files "${tmp}" "${package_dir}" || return 1
+  swiftpm_accepts_lockfile "${tmp}" "${package_dir}" "${tmp}/swift-cache" || return 1
+
+  local shared_version
+  shared_version="$(pin_state_value "${package_dir}" "shared" "version")"
+  test "${shared_version}" = "3.6.9" || return 1
+
+  echo "pins=$(pin_count "${package_dir}")"
+  echo "shared-version=${shared_version}"
+  echo "force-resolve=ok"
+}
+
+scenario_resolves_pubgrub_release_over_prerelease() {
+  local tmp
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "${tmp}"' RETURN
+  prepare_isolated_state "${tmp}"
+
+  local fixture_dir
+  fixture_dir="$(copy_swifterpm_fixture "PubGrubReleaseOverPrerelease" "${tmp}")" || return 1
+
+  init_git_package "${tmp}" "${fixture_dir}/A" || return 1
+  tag_git_package "${tmp}" "${fixture_dir}/A" "1.0.0" || return 1
+  init_git_package "${tmp}" "${fixture_dir}/B" || return 1
+  tag_git_package "${tmp}" "${fixture_dir}/B" "1.0.0-prerelease-20240616" "1.0.0" || return 1
+
+  local package_dir="${fixture_dir}/App"
+  compare_swiftpm_state_files "${tmp}" "${package_dir}" || return 1
+  swiftpm_accepts_lockfile "${tmp}" "${package_dir}" "${tmp}/swift-cache" || return 1
+
+  local b_version
+  b_version="$(pin_state_value "${package_dir}" "b" "version")"
+  test "${b_version}" = "1.0.0" || return 1
+
+  echo "pins=$(pin_count "${package_dir}")"
+  echo "b-version=${b_version}"
+  echo "force-resolve=ok"
 }
 
 scenario_manifest_cache_stays_under_build_directory() {
@@ -1278,6 +1452,26 @@ Describe "swifterpm resolve against SwiftPM dependency graph fixtures"
     The output should include "workspace-state=match"
     The output should include "local-identities=localone localtwo"
   End
+
+  It "matches SwiftPM's shared dependency intersection scenario"
+    When call scenario_resolves_pubgrub_shared_dependency_intersection
+    The status should be success
+    The output should include "pins=3"
+    The output should include "shared-version=3.6.9"
+    The output should include "package-resolved=match"
+    The output should include "workspace-state=match"
+    The output should include "force-resolve=ok"
+  End
+
+  It "matches SwiftPM's release-over-prerelease scenario"
+    When call scenario_resolves_pubgrub_release_over_prerelease
+    The status should be success
+    The output should include "pins=2"
+    The output should include "b-version=1.0.0"
+    The output should include "package-resolved=match"
+    The output should include "workspace-state=match"
+    The output should include "force-resolve=ok"
+  End
 End
 
 Describe "swifterpm registry integration"
@@ -1289,6 +1483,24 @@ Describe "swifterpm registry integration"
     The output should include "registry-download=present"
     The output should include "checkout=absent"
     The output should include "corrupt-archive-redownload=ok"
+  End
+
+  It "falls back to source control when a registry identifier has no versions"
+    When call scenario_replace_scm_with_registry_falls_back_to_scm_when_registry_has_no_versions
+    The status should be success
+    The output should include "identity=example.registryfoo"
+    The output should include "kind=localSourceControl"
+    The output should include "version=1.0.0"
+    The output should include "checkout=present"
+    The output should include "registry-download=absent"
+  End
+
+  It "matches SwiftPM when the newest candidate has an incompatible direct dependency"
+    When call scenario_replace_scm_with_registry_skips_directly_incompatible_candidate
+    The status should be success
+    The output should include "swiftpm-service-version=2.3.0"
+    The output should include "swifterpm-service-version=2.3.0"
+    The output should include "proto-version=1.35.1"
   End
 
   It "stores manifest dump caches under .build/swifterpm"
