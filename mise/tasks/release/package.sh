@@ -34,6 +34,30 @@ mask_ci_value() {
   fi
 }
 
+op_read_with_retry() {
+  local description="$1"
+  shift
+  local max_attempts="${SWIFTERPM_OP_READ_ATTEMPTS:-5}"
+  local delay_seconds="${SWIFTERPM_OP_READ_DELAY_SECONDS:-10}"
+  local attempt=1
+
+  while true; do
+    if op read "$@"; then
+      return 0
+    fi
+
+    local status=$?
+    if ((attempt >= max_attempts)); then
+      return "${status}"
+    fi
+
+    echo "op read failed for ${description}; retrying in ${delay_seconds}s (${attempt}/${max_attempts})" >&2
+    sleep "${delay_seconds}"
+    attempt=$((attempt + 1))
+    delay_seconds=$((delay_seconds * 2))
+  done
+}
+
 mkdir -p dist
 
 case "${target}" in
@@ -74,8 +98,8 @@ if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]];
   mask_ci_value "${keychain_password}"
   team_id="${SWIFTERPM_APPLE_TEAM_ID:-U6LC622NKF}"
   certificate_name="${SWIFTERPM_CERTIFICATE_NAME:-Developer ID Application: Tuist GmbH (U6LC622NKF)}"
-  certificate_item="${SWIFTERPM_CERTIFICATE_ITEM:-op://tuist/Developer ID Application Certificate}"
-  app_password_item="${SWIFTERPM_APP_PASSWORD_ITEM:-op://tuist/App Specific Password}"
+  certificate_item="${SWIFTERPM_CERTIFICATE_ITEM:-op://swifterpm/Developer ID Application Certificate}"
+  app_password_item="${SWIFTERPM_APP_PASSWORD_ITEM:-op://swifterpm/App Specific Password}"
 
   if [[ -z "${OP_SERVICE_ACCOUNT_TOKEN:-}" ]]; then
     echo "OP_SERVICE_ACCOUNT_TOKEN is required to sign and notarize macOS releases" >&2
@@ -98,8 +122,8 @@ if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]];
   security unlock-keychain -p "${keychain_password}" "${keychain_path}"
   security list-keychains -d user -s "${keychain_path}"
 
-  op read "${certificate_item}/certificate.p12" --out-file "${stage_dir}/certificate.p12" >/dev/null
-  certificate_password="$(op read "${certificate_item}/password")"
+  op_read_with_retry "Developer ID certificate" "${certificate_item}/certificate.p12" --out-file "${stage_dir}/certificate.p12" >/dev/null
+  certificate_password="$(op_read_with_retry "Developer ID certificate password" "${certificate_item}/password")"
   mask_ci_value "${certificate_password}"
   security import "${stage_dir}/certificate.p12" \
     -k "${keychain_path}" \
@@ -122,8 +146,8 @@ if [[ "${target}" == *-apple-darwin && "${SWIFTERPM_SIGN_MACOS:-}" == "true" ]];
 
   echo "Submitting ${bin_name} for notarization"
   notarization_zip="${stage_dir}/notarization.zip"
-  notary_username="$(op read "${app_password_item}/username")"
-  notary_password="$(op read "${app_password_item}/password")"
+  notary_username="$(op_read_with_retry "Apple notarization username" "${app_password_item}/username")"
+  notary_password="$(op_read_with_retry "Apple notarization password" "${app_password_item}/password")"
   mask_ci_value "${notary_username}"
   mask_ci_value "${notary_password}"
   ditto -c -k --keepParent "${stage_dir}/${bin_name}" "${notarization_zip}"
