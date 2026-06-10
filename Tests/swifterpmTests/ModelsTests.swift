@@ -90,15 +90,16 @@ struct ModelsTests {
             )
 
             try await ResolvedFile.write(packageDir: root, resolved: resolved)
-            let data = try await AsyncFileSystem.readData(
-                from: root.appendingPathComponent("Package.resolved"))
-            let contents = try #require(String(data: data, encoding: .utf8))
 
-            #expect(contents.contains("https://github.com/example/foo"))
-            #expect(!contents.contains("https:\\/\\/github.com\\/example\\/foo"))
             #expect(try await ResolvedFile.read(packageDir: root).pins == resolved.pins)
             #expect(try await ResolvedFile.read(packageDir: root).originHash == resolved.originHash)
             #expect(try await ResolvedFile.readIfCurrent(packageDir: root)?.pins == resolved.pins)
+
+            let resolvedFilePath = root.appendingPathComponent("Package.resolved")
+            let rawData = try await AsyncFileSystem.readData(from: resolvedFilePath)
+            let rawContents = try #require(String(data: rawData, encoding: .utf8))
+            #expect(rawContents.contains("https://github.com/example/foo"))
+            #expect(!rawContents.contains("https:\\/\\/github.com\\/example\\/foo"))
         }
     }
 
